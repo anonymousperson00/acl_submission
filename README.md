@@ -29,3 +29,5 @@
 ```bash
 pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+
+All the experiments done in same env setup
