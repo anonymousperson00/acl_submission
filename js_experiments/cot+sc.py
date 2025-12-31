@@ -18,7 +18,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-test_csv = "bb.csv"
+test_csv = "dataset/nps_js_test.csv"
 
 model_id = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
 local_dir = "qwen25_coder_1_5b_local"

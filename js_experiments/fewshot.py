@@ -17,7 +17,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-prompt_csv = "npm_js_patch_functions_prompt40.csv"
+prompt_csv = "datasets/npm_js_functions_prompt40.csv"
 test_csv = "test_data.csv"
 
 model_name = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
