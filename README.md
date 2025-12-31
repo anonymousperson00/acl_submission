@@ -9,7 +9,7 @@
   - merges aggregated results back into the main Kotlin CSV to produce labeled datasets (rule-hit counts + binary vuln flags).
 - **Train/Test preparation**: builds train/test splits from the labeled Kotlin dataset (optionally de-duplicated by `sample_id` or normalized code hash) for reproducible experiments.
 - **LLM fine-tuning (supervised)**:
-  - fine-tunes on both base and instruction-tuned code models on Kotlin labeled data (binary classification: vulnerable vs non-vulnerable),
+  - fine-tunes code models on Kotlin labeled data (binary classification: vulnerable vs non-vulnerable),
   - supports LoRA/QLoRA settings for GPU-efficient training,
   - results and cross language analysis recorded in the tables of the paper.
 
