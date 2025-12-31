@@ -1,0 +1,2400 @@
+function,label
+"func (bb *basicBlock) ReturnBlock() bool {
+	return bb.id == basicBlockIDReturnBlock
+}",0
+"func (expr *IntroducerExpr) eval(env *ExpressionEnv) (eval, error) {
+	e, err := expr.Inner.eval(env)
+	if err != nil {
+		return nil, err
+	}
+
+	var b *evalBytes
+	if expr.TypedCollation.Collation == collations.CollationBinaryID {
+		b = evalToBinary(e)
+	} else {
+		b, err = evalToVarchar(e, expr.TypedCollation.Collation, false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	b.flag |= flagExplicitCollation
+	return b, nil
+}",1
+"func (f *tcpListenerFile) Accept() (socketapi.TCPConn, experimentalsys.Errno) {
+	// Ensure we have an incoming connection, otherwise return immediately.
+	if f.nonblock {
+		if ready, errno := _pollSock(f.tl, fsapi.POLLIN, 0); !ready || errno != 0 {
+			return nil, experimentalsys.EAGAIN
+		}
+	}
+
+	// Accept normally blocks goroutines, but we
+	// made sure that we have an incoming connection,
+	// so we should be safe.
+	if conn, err := f.tl.Accept(); err != nil {
+		return nil, experimentalsys.UnwrapOSError(err)
+	} else {
+		return newTcpConn(conn.(*net.TCPConn)), 0
+	}
+}",0
+"func (i *instruction) asULoad(dst operand, amode addressMode, sizeInBits byte) {
+	switch sizeInBits {
+	case 8:
+		i.kind = uLoad8
+	case 16:
+		i.kind = uLoad16
+	case 32:
+		i.kind = uLoad32
+	case 64:
+		i.kind = uLoad64
+	}
+	i.rd = dst
+	i.amode = amode
+}",0
+"func (c cond) flag() condFlag {
+	if c.kind() != condKindCondFlagSet {
+		panic(""condition is not a flag"")
+	}
+	return condFlag(c >> 2)
+}",0
+"func (rdi *Ingestor) parseBody(body io.Reader) (any, error) {
+	var data any
+	var err error
+
+	if body == nil {
+		return nil, nil
+	}
+
+	if rdi.restCfg.Parse == ""json"" {
+		var jsonData any
+		dec := json.NewDecoder(body)
+		if err := dec.Decode(&jsonData); err != nil {
+			return nil, fmt.Errorf(""cannot decode json: %w"", err)
+		}
+
+		data = jsonData
+	} else {
+		data, err = io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf(""cannot read response body: %w"", err)
+		}
+	}
+
+	return data, nil
+}",1
+"func (i *Instruction) sideEffect() sideEffect {
+	if e := instructionSideEffects[i.opcode]; e == sideEffectUnknown {
+		panic(""BUG: side effect info not registered for "" + i.opcode.String())
+	} else {
+		return e
+	}
+}",0
+"func (m *machine) lowerFcvtFromUint(rn, rd operand, src64, dst64 bool) {
+	var op sseOpcode
+	if dst64 {
+		op = sseOpcodeCvtsi2sd
+	} else {
+		op = sseOpcodeCvtsi2ss
+	}
+
+	// Src is 32 bit, then we just perform the conversion with 64 bit width.
+	//
+	// See the following link for why we use 64bit conversion for unsigned 32bit integer sources:
+	// https://stackoverflow.com/questions/41495498/fpu-operations-generated-by-gcc-during-casting-integer-to-float.
+	//
+	// Here's the summary:
+	// >> CVTSI2SS is indeed designed for converting a signed integer to a scalar single-precision float,
+	// >> not an unsigned integer like you have here. So what gives? Well, a 64-bit processor has 64-bit wide
+	// >> registers available, so the unsigned 32-bit input values can be stored as signed 64-bit intermediate values,
+	// >> which allows CVTSI2SS to be used after all.
+	//
+	if !src64 {
+		// Before we convert, we have to clear the higher 32-bits of the 64-bit register
+		// to get the correct result.
+		tmp := m.c.AllocateVReg(ssa.TypeI32)
+		m.insert(m.allocateInstr().asMovzxRmR(extModeLQ, rn, tmp))
+		m.insert(m.allocateInstr().asGprToXmm(op, newOperandReg(tmp), rd.reg(), true))
+		return
+	}
+
+	// If uint64, we have to do a bit more work.
+	endTarget, end := m.allocateBrTarget()
+
+	var tmpXmm regalloc.VReg
+	if dst64 {
+		tmpXmm = m.c.AllocateVReg(ssa.TypeF64)
+	} else {
+		tmpXmm = m.c.AllocateVReg(ssa.TypeF32)
+	}
+
+	// Check if the most significant bit (sign bit) is set.
+	test := m.allocateInstr()
+	test.asCmpRmiR(false, rn, rn.reg(), src64)
+	m.insert(test)
+
+	// Jump if the sign bit is set.
+	ifSignTarget, ifSign := m.allocateBrTarget()
+	jmpIfNeg := m.allocateInstr()
+	jmpIfNeg.asJmpIf(condS, newOperandLabel(ifSign))
+	m.insert(jmpIfNeg)
+
+	// If the sign bit is not set, we could fit the unsigned int into float32/float64.
+	// So, we convert it to float and emit jump instruction to exit from this branch.
+	cvt := m.allocateInstr()
+	cvt.asGprToXmm(op, rn, tmpXmm, src64)
+	m.insert(cvt)
+
+	// We are done, jump to end.
+	jmpEnd := m.allocateInstr()
+	jmpEnd.asJmp(newOperandLabel(end))
+	m.insert(jmpEnd)
+
+	// Now handling the case where sign-bit is set.
+	// We emit the following sequences:
+	// 	   mov      %rn, %tmp
+	// 	   shr      1, %tmp
+	// 	   mov      %rn, %tmp2
+	// 	   and      1, %tmp2
+	// 	   or       %tmp2, %tmp
+	// 	   cvtsi2ss %tmp, %xmm0
+	// 	   addsd    %xmm0, %xmm0
+	m.insert(ifSignTarget)
+
+	tmp := m.copyToTmp(rn.reg())
+	shr := m.allocateInstr()
+	shr.asShiftR(shiftROpShiftRightLogical, newOperandImm32(1), tmp, src64)
+	m.insert(shr)
+
+	tmp2 := m.copyToTmp(rn.reg())
+	and := m.allocateInstr()
+	and.asAluRmiR(aluRmiROpcodeAnd, newOperandImm32(1), tmp2, src64)
+	m.insert(and)
+
+	or := m.allocateInstr()
+	or.asAluRmiR(aluRmiROpcodeOr, newOperandReg(tmp2), tmp, src64)
+	m.insert(or)
+
+	cvt2 := m.allocateInstr()
+	cvt2.asGprToXmm(op, newOperandReg(tmp), tmpXmm, src64)
+	m.insert(cvt2)
+
+	addsd := m.allocateInstr()
+	if dst64 {
+		addsd.asXmmRmR(sseOpcodeAddsd, newOperandReg(tmpXmm), tmpXmm)
+	} else {
+		addsd.asXmmRmR(sseOpcodeAddss, newOperandReg(tmpXmm), tmpXmm)
+	}
+	m.insert(addsd)
+
+	m.insert(endTarget)
+	m.copyTo(tmpXmm, rd.reg())
+}",0
+"func peekAll(pipes, sockets []pollFd) (npipes, nsockets int, errno sys.Errno) {
+	npipes, errno = peekPipes(pipes)
+	if errno != 0 {
+		return
+	}
+
+	// Invoke wsaPoll with a 0-timeout to avoid blocking.
+	// Timeouts are handled in pollWithContext instead.
+	nsockets, errno = wsaPoll(sockets, 0)
+	if errno != 0 {
+		return
+	}
+
+	count := npipes + nsockets
+	if count > 0 {
+		return
+	}
+
+	return
+}",0
+"func (e *ECR) CheckOptions(domain string, option types.RegistryOptions) error {
+	if !strings.HasSuffix(domain, ecrURL) {
+		return xerrors.Errorf(""ECR : %w"", types.InvalidURLPattern)
+	}
+
+	cfg, err := getSession(option)
+	if err != nil {
+		return err
+	}
+
+	svc := ecr.NewFromConfig(cfg)
+	e.Client = svc
+	return nil
+}",1
+"func (p Precompile) ConvertVestingAccount(
+	ctx sdk.Context,
+	stateDB vm.StateDB,
+	method *abi.Method,
+	args []interface{},
+) ([]byte, error) {
+	msg, vestingAddr, err := NewMsgConvertVestingAccount(args)
+	if err != nil {
+		return nil, err
+	}
+
+	p.Logger(ctx).Debug(
+		""tx called"",
+		""method"", method.Name,
+		""args"", fmt.Sprintf(""{ vestingAddress: %s }"", msg.VestingAddress),
+	)
+
+	_, err = p.vestingKeeper.ConvertVestingAccount(sdk.WrapSDKContext(ctx), msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = p.EmitConvertVestingAccountEvent(ctx, stateDB, vestingAddr); err != nil {
+		return nil, err
+	}
+
+	return method.Outputs.Pack(true)
+}",1
+"func (c condFlag) String() string {
+	switch c {
+	case eq:
+		return ""eq""
+	case ne:
+		return ""ne""
+	case hs:
+		return ""hs""
+	case lo:
+		return ""lo""
+	case mi:
+		return ""mi""
+	case pl:
+		return ""pl""
+	case vs:
+		return ""vs""
+	case vc:
+		return ""vc""
+	case hi:
+		return ""hi""
+	case ls:
+		return ""ls""
+	case ge:
+		return ""ge""
+	case lt:
+		return ""lt""
+	case gt:
+		return ""gt""
+	case le:
+		return ""le""
+	case al:
+		return ""al""
+	case nv:
+		return ""nv""
+	default:
+		panic(strconv.Itoa(int(c)))
+	}
+}",0
+"func (UnimplementedFS) Symlink(_, _ string) Errno {
+	return ENOSYS
+}",0
+"func getSimpleSigningLayersFromSignatureManifest(manifestRef string, auth authn.Authenticator) ([]v1.Descriptor, error) {
+	craneOpts := []crane.Option{crane.WithAuth(auth)}
+
+	// Get the manifest of the signature
+	mf, err := crane.Manifest(manifestRef, craneOpts...)
+	if err != nil {
+		return nil, fmt.Errorf(""error getting signature manifest: %w"", err)
+	}
+
+	// Parse the manifest
+	manifest, err := v1.ParseManifest(bytes.NewReader(mf))
+	if err != nil {
+		return nil, fmt.Errorf(""error parsing signature manifest: %w"", err)
+	}
+
+	// Loop through its layers and extract the simple signing layers
+	var results []v1.Descriptor
+	for _, layer := range manifest.Layers {
+		if layer.MediaType == ""application/vnd.dev.cosign.simplesigning.v1+json"" {
+			// We found a simple signing layer, store and return it even if we may fail to parse it later
+			results = append(results, layer)
+		}
+	}
+
+	// Return the results - we may not have found any simple signing layers, but we still return the results
+	return results, nil
+}",1
+"func (i *instruction) asMOVZ(dst regalloc.VReg, imm uint64, shift uint64, dst64bit bool) {
+	i.kind = movZ
+	i.rd = operandNR(dst)
+	i.u1 = imm
+	i.u2 = shift
+	if dst64bit {
+		i.u3 = 1
+	}
+}",0
+"func (i *instruction) asMove32(rd, rn regalloc.VReg) {
+	i.kind = mov32
+	i.rn, i.rd = operandNR(rn), operandNR(rd)
+}",0
+"func TestDoubleEmbedded(t *testing.T){
+	data := map[string][]string{
+		""F1"": {""raw a""},
+		""F2"": {""raw b""},
+		""F3"": {""raw c""},
+	}
+
+	
+	s := S25{}
+	decoder := NewDecoder()
+
+	if err := decoder.Decode(&s, data); err != nil {
+		t.Fatal(""Error while decoding:"", err)
+	}
+
+	expected := S25{
+		F1: ""raw a"",
+		S25e: S25e{
+			F2: ""raw b"",
+			S25ee: S25ee{
+				F3: ""raw c"",
+			},
+		},
+	}
+	if !reflect.DeepEqual(expected, s) {
+		t.Errorf(""Expected %v errors, got %v"", expected, s)
+	}
+
+}",1
+"func (o *Options) updateGitPackage(ctx context.Context, repo *git.Repository, packageName string, newVersion NewVersionResults, ref plumbing.ReferenceName) (string, error) {
+	// get the filename from the map of melange configs we loaded at the start
+	pc, ok := o.PackageConfigs[packageName]
+	if !ok {
+		return """", fmt.Errorf(""no melange config found for package %s"", packageName)
+	}
+
+	// if manual update create an issue rather than a pull request
+	if pc.Config.Update.Manual {
+		return o.createNewVersionIssue(ctx, repo, packageName, newVersion)
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return """", fmt.Errorf(""failed to get git worktree: %w"", err)
+	}
+
+	root := worktree.Filesystem.Root()
+	log.Printf(""working directory: %s"", root)
+
+	configFile := filepath.Join(root, pc.Filename)
+	if configFile == """" {
+		return """", fmt.Errorf(""no config filename found for package %s"", packageName)
+	}
+
+	log.Printf(""updating %s to version %s commit %s"", packageName, newVersion.Version, newVersion.Commit)
+
+	// if new versions are available lets bump the packages in the target melange git repo
+	err = melange.Bump(ctx, configFile, newVersion.Version, newVersion.Commit)
+	if err != nil {
+		// add this to the list of messages to print at the end of the update
+		return fmt.Sprintf(""failed to bump package %s to version %s: %s"", packageName, newVersion.Version, err.Error()), nil
+	}
+
+	// if the new version has a bump epoch flag set, increment the epoch
+	// this can happen if we have a new expected commit sha but the version hasn't changed
+	if newVersion.BumpEpoch {
+		pc.Config.Package.Epoch++
+	}
+
+	rs, err := debug(worktree)
+	if err != nil {
+		return """", err
+	}
+	o.Logger.Printf(""after bump: %s git status: %s"", packageName, string(rs))
+
+	// for now wolfi is using a Makefile, if it exists check if the package is listed and update the version + epoch if it is
+	err = o.updateMakefile(root, packageName, newVersion.Version, worktree)
+	if err != nil {
+		return fmt.Sprintf(""failed to update Makefile: %s"", err.Error()), nil
+	}
+
+	// if mapping data has a strip prefix, add it back in to the version for when updating git modules
+	latestVersionWithPrefix := newVersion.Version
+	ghm := o.PackageConfigs[packageName].Config.Update.GitHubMonitor
+	if ghm != nil {
+		if ghm.StripPrefix != """" {
+			latestVersionWithPrefix = ghm.StripPrefix + latestVersionWithPrefix
+		}
+	}
+	// some repos could use git submodules, let's check if a submodule file exists and bump any matching packages
+	err = o.updateGitModules(root, packageName, latestVersionWithPrefix, worktree)
+	if err != nil {
+		return fmt.Sprintf(""failed to update git modules: %s"", err.Error()), nil
+	}
+
+	// now make sure update config is configured
+	updated, err := config.ParseConfiguration(ctx, filepath.Join(root, pc.Filename))
+	if err != nil {
+		return """", fmt.Errorf(""failed to parse %v"", err)
+	}
+	pctx := &melangebuild.PipelineBuild{
+		Build: &melangebuild.Build{
+			Configuration: *updated,
+		},
+		Package: &updated.Package,
+	}
+
+	// get a map of variable mutations we can substitute vars in URLs
+	mutations, err := melangebuild.MutateWith(pctx, map[string]string{})
+	if err != nil {
+		return """", err
+	}
+
+	// Skip any processing for definitions with a single pipeline
+	if len(updated.Pipeline) > 1 && deps.ContainsGoBumpPipeline(updated) {
+		if err := o.updateGoBumpDeps(updated, root, pc.Filename, mutations); err != nil {
+			return fmt.Sprintf(""error cleaning up go/bump deps: %v"", err), nil
+		}
+	}
+
+	rs, err = debug(worktree)
+	if err != nil {
+		return """", err
+	}
+	o.Logger.Printf(""after clean go bumps: %s git status: %s"", packageName, string(rs))
+
+	// Run yam formatter
+	err = yam.FormatConfigurationFile(root, pc.Filename)
+	if err != nil {
+		return fmt.Sprintf(""failed to format configuration file: %v"", err), nil
+	}
+
+	_, err = worktree.Add(pc.Filename)
+	if err != nil {
+		return """", fmt.Errorf(""failed to git add %s: %w"", configFile, err)
+	}
+
+	// if we're not running in batch mode, lets commit and PR each change
+	if !o.DryRun {
+		pr, err := o.proposeChanges(ctx, repo, ref, packageName, newVersion)
+		if err != nil {
+			return fmt.Sprintf(""failed to propose changes: %s"", err.Error()), nil
+		}
+		if pr != """" {
+			o.Logger.Println(color.GreenString(pr))
+		}
+	}
+	return """", nil
+}",1
+"func (i *instruction) asRet() {
+	i.kind = ret
+}",0
+"func PushTag(dir, tagName string) error {
+	r, err := git.PlainOpen(dir)
+	if err != nil {
+		return err
+	}
+
+	// force remote URL to be https, using git@ requires ssh keys and we default to using basic auth
+	remote, err := r.Remote(""origin"")
+	if err != nil {
+		return err
+	}
+	gitURL, err := ParseGitURL(remote.Config().URLs[0])
+	if err != nil {
+		return err
+	}
+	remoteURL := fmt.Sprintf(""https://github.com/%s/%s.git"", gitURL.Organisation, gitURL.Name)
+
+	po := &git.PushOptions{
+		RemoteName: ""origin"",
+		RemoteURL:  remoteURL,
+		RefSpecs:   []config.RefSpec{config.RefSpec(fmt.Sprintf(""refs/tags/%s:refs/tags/%s"", tagName, tagName))},
+		Auth:       GetGitAuth(),
+	}
+
+	err = r.Push(po)
+
+	if err != nil {
+		if err == git.NoErrAlreadyUpToDate {
+			return nil
+		}
+		return fmt.Errorf(""failed to push tag: %w"", err)
+	}
+
+	return nil
+}",1
+"func TestWebAPIChangeUserPwdMock(t *testing.T) {
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+	token, err := getJWTAPIUserTokenFromTestServer(defaultUsername, defaultPassword)
+	assert.NoError(t, err)
+	// invalid json
+	req, err := http.NewRequest(http.MethodPut, userPwdPath, bytes.NewBuffer([]byte(""{"")))
+	assert.NoError(t, err)
+	setBearerForReq(req, token)
+	rr := executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+
+	pwd := make(map[string]string)
+	pwd[""current_password""] = defaultPassword
+	pwd[""new_password""] = defaultPassword
+	asJSON, err := json.Marshal(pwd)
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPut, userPwdPath, bytes.NewBuffer(asJSON))
+	assert.NoError(t, err)
+	setBearerForReq(req, token)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), ""the new password must be different from the current one"")
+
+	pwd[""new_password""] = altAdminPassword
+	asJSON, err = json.Marshal(pwd)
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPut, userPwdPath, bytes.NewBuffer(asJSON))
+	assert.NoError(t, err)
+	setBearerForReq(req, token)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	_, err = getJWTAPIUserTokenFromTestServer(defaultUsername, defaultPassword)
+	assert.Error(t, err)
+	token, err = getJWTAPIUserTokenFromTestServer(defaultUsername, altAdminPassword)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, token)
+
+	// remove the change password permission
+	user.Filters.WebClient = []string{sdk.WebClientPasswordChangeDisabled}
+	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, """")
+	assert.NoError(t, err)
+	assert.Len(t, user.Filters.WebClient, 1)
+	assert.Contains(t, user.Filters.WebClient, sdk.WebClientPasswordChangeDisabled)
+
+	token, err = getJWTAPIUserTokenFromTestServer(defaultUsername, altAdminPassword)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, token)
+
+	pwd[""current_password""] = altAdminPassword
+	pwd[""new_password""] = defaultPassword
+	asJSON, err = json.Marshal(pwd)
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPut, userPwdPath, bytes.NewBuffer(asJSON))
+	assert.NoError(t, err)
+	setBearerForReq(req, token)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}",1
+"func prepareModel(modelPath string, req gallery.GalleryModel, cl *config.BackendConfigLoader, downloadStatus func(string, string, string, float64)) error {
+
+	config, err := gallery.GetGalleryConfigFromURL(req.URL, modelPath)
+	if err != nil {
+		return err
+	}
+
+	config.Files = append(config.Files, req.AdditionalFiles...)
+
+	return gallery.InstallModel(modelPath, req.Name, &config, req.Overrides, downloadStatus)
+}",0
+"func (p *Precompile) ConvertVestingAccount(
+	ctx sdk.Context,
+	stateDB vm.StateDB,
+	method *abi.Method,
+	args []interface{},
+) ([]byte, error) {
+	msg, vestingAddr, err := NewMsgConvertVestingAccount(args)
+	if err != nil {
+		return nil, err
+	}
+
+	p.Logger(ctx).Debug(
+		""tx called"",
+		""method"", method.Name,
+		""args"", fmt.Sprintf(""{ vestingAddress: %s }"", msg.VestingAddress),
+	)
+
+	_, err = p.vestingKeeper.ConvertVestingAccount(sdk.WrapSDKContext(ctx), msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = p.EmitConvertVestingAccountEvent(ctx, stateDB, vestingAddr); err != nil {
+		return nil, err
+	}
+
+	return method.Outputs.Pack(true)
+}",0
+"func MalfeasanceInfo(smesher types.NodeID, mp *MalfeasanceProof) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf(""generate layer: %v\n"", mp.Layer))
+	b.WriteString(fmt.Sprintf(""smesher id: %s\n"", smesher.String()))
+	switch mp.Proof.Type {
+	case MultipleATXs:
+		p, ok := mp.Proof.Data.(*AtxProof)
+		if ok {
+			b.WriteString(
+				fmt.Sprintf(
+					""cause: smesher published multiple ATXs in epoch %d\n"",
+					p.Messages[0].InnerMsg.PublishEpoch,
+				),
+			)
+			b.WriteString(
+				fmt.Sprintf(""1st message hash: %s\n"", hex.EncodeToString(p.Messages[0].InnerMsg.MsgHash.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""1st message signature: %s\n"", hex.EncodeToString(p.Messages[0].Signature.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""2nd message hash: %s\n"", hex.EncodeToString(p.Messages[1].InnerMsg.MsgHash.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""2nd message signature: %s\n"", hex.EncodeToString(p.Messages[1].Signature.Bytes())),
+			)
+		}
+	case MultipleBallots:
+		p, ok := mp.Proof.Data.(*BallotProof)
+		if ok {
+			b.WriteString(
+				fmt.Sprintf(""cause: smesher published multiple ballots in layer %d\n"", p.Messages[0].InnerMsg.Layer),
+			)
+			b.WriteString(
+				fmt.Sprintf(""1st message hash: %s\n"", hex.EncodeToString(p.Messages[0].InnerMsg.MsgHash.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""1st message signature: %s\n"", hex.EncodeToString(p.Messages[0].Signature.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""2nd message hash: %s\n"", hex.EncodeToString(p.Messages[1].InnerMsg.MsgHash.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""2nd message signature: %s\n"", hex.EncodeToString(p.Messages[1].Signature.Bytes())),
+			)
+		}
+	case HareEquivocation:
+		p, ok := mp.Proof.Data.(*HareProof)
+		if ok {
+			b.WriteString(fmt.Sprintf(""cause: smesher published multiple hare messages in layer %d round %d\n"",
+				p.Messages[0].InnerMsg.Layer, p.Messages[0].InnerMsg.Round))
+			b.WriteString(
+				fmt.Sprintf(""1st message hash: %s\n"", hex.EncodeToString(p.Messages[0].InnerMsg.MsgHash.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""1st message signature: %s\n"", hex.EncodeToString(p.Messages[0].Signature.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""2nd message hash: %s\n"", hex.EncodeToString(p.Messages[1].InnerMsg.MsgHash.Bytes())),
+			)
+			b.WriteString(
+				fmt.Sprintf(""2nd message signature: %s\n"", hex.EncodeToString(p.Messages[1].Signature.Bytes())),
+			)
+		}
+	case InvalidPostIndex:
+		p, ok := mp.Proof.Data.(*InvalidPostIndexProof)
+		if ok {
+			atx := wire.ActivationTxFromWireV1(&p.Atx)
+			b.WriteString(
+				fmt.Sprintf(
+					""cause: smesher published ATX %s with invalid post index %d in epoch %d\n"",
+					atx.ID().ShortString(),
+					p.InvalidIdx,
+					p.Atx.Publish,
+				))
+		}
+	}
+	return b.String()
+}",1
+"func (o *Options) updateGitModules(dir, packageName, version string, wt *git.Worktree) error {
+	// if no gitmodules file exist this in a noop
+	if _, err := os.Stat(filepath.Join(dir, "".gitmodules"")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	ghm := o.PackageConfigs[packageName].Config.Update.GitHubMonitor
+
+	if ghm == nil {
+		o.Logger.Printf(""package %s  is not a github repo in mapping data, not attempting to bump gitmodules"", packageName)
+		return nil
+	}
+
+	if ghm.Identifier == """" {
+		o.Logger.Printf(""no identifier found in mapping data for package %s, not attempting to bump gitmodules"", packageName)
+		return nil
+	}
+
+	parts := strings.Split(ghm.Identifier, ""/"")
+	if len(parts) != 2 {
+		o.Logger.Printf(""identifier doesn't look like a github owner/repo in mapping data for package %s, not attempting to bump gitmodules"", packageName)
+		return nil
+	}
+
+	return submodules.Update(dir, parts[0], parts[1], version, wt)
+}",1
+"func (b *builder) RunPasses() {
+	b.runPreBlockLayoutPasses()
+	b.runBlockLayoutPass()
+	b.runPostBlockLayoutPasses()
+	b.runFinalizingPasses()
+}",0
+"func validateInvalidPostIndex(ctx context.Context,
+	logger log.Log,
+	db sql.Executor,
+	edVerifier SigVerifier,
+	postVerifier postVerifier,
+	proof *wire.InvalidPostIndexProof,
+) (types.NodeID, error) {
+	atx := &proof.Atx
+	if !edVerifier.Verify(signing.ATX, atx.SmesherID, atx.SignedBytes(), atx.Signature) {
+		return types.EmptyNodeID, errors.New(""invalid signature"")
+	}
+	commitmentAtx := atx.CommitmentATX
+	if commitmentAtx == nil {
+		atx, err := atxs.CommitmentATX(db, atx.SmesherID)
+		if err != nil {
+			return types.EmptyNodeID, fmt.Errorf(""getting commitment ATX: %w"", err)
+		}
+		commitmentAtx = &atx
+	}
+	post := (*shared.Proof)(atx.NIPost.Post)
+	meta := &shared.ProofMetadata{
+		NodeId:          atx.SmesherID[:],
+		CommitmentAtxId: commitmentAtx[:],
+		NumUnits:        atx.NumUnits,
+		Challenge:       atx.NIPost.PostMetadata.Challenge,
+		LabelsPerUnit:   atx.NIPost.PostMetadata.LabelsPerUnit,
+	}
+	if err := postVerifier.Verify(
+		ctx,
+		post,
+		meta,
+		verifying.SelectedIndex(int(proof.InvalidIdx)),
+	); err != nil {
+		return atx.SmesherID, nil
+	}
+	numInvalidProofsPostIndex.Inc()
+	return types.EmptyNodeID, errors.New(""invalid post index malfeasance proof - POST is valid"")
+}",1
+"func TestCookieNameFromDomain(t *testing.T) {
+	tests := []struct {
+		name            string
+		domain          string
+		expectedOutcome string
+	}{
+		{
+			name:            ""Simple Domain"",
+			domain:          ""example.com"",
+			expectedOutcome: ""_example_com_jwt2_"",
+		},
+		{
+			name:            ""Domain with Underscore"",
+			domain:          ""example_test.com"",
+			expectedOutcome: ""_example_test_com_jwt2_"",
+		},
+		{
+			name:            ""Domain with Hyphen"",
+			domain:          ""example-test.com"",
+			expectedOutcome: ""_example_test_com_jwt2_"",
+		},
+		{
+			name:            ""Domain with Special Characters"",
+			domain:          ""example&test.com"",
+			expectedOutcome: ""_example_test_com_jwt2_"",
+		},
+		{
+			name:            ""Subdomain"",
+			domain:          ""subdomain.example.com"",
+			expectedOutcome: ""_subdomain_example_com_jwt2_"",
+		},
+		{
+			name:            ""Subdomain with Hyphen"",
+			domain:          ""sub-domain.example.com"",
+			expectedOutcome: ""_sub_domain_example_com_jwt2_"",
+		},
+		{
+			name:            ""Subdomain with Underscore"",
+			domain:          ""sub_domain.example.com"",
+			expectedOutcome: ""_sub_domain_example_com_jwt2_"",
+		},
+		{
+			name:            ""Subdomain with Special Characters"",
+			domain:          ""sub&domain.example.com"",
+			expectedOutcome: ""_sub_domain_example_com_jwt2_"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := server_lib.CookieNameFromDomain(tt.domain)
+			if actual != tt.expectedOutcome {
+				t.Errorf(""expected %q, got %q"", tt.expectedOutcome, actual)
+			}
+		})
+	}
+}",1
+"func LoadCounterContract() (evmtypes.CompiledContract, error) {
+	return contractutils.LoadContractFromJSONFile(""Counter.json"")
+}",0
+"func (o *Options) Update(ctx context.Context) error {
+	var err error
+	var repo *git.Repository
+	var latestVersions map[string]NewVersionResults
+
+	// retry the whole process a few times in case of issues with the git repo
+	for i := 0; i < o.MaxRetries; i++ {
+		// clone the melange config git repo into a temp folder so we can work with it
+		tempDir, err := os.MkdirTemp("""", ""wolfictl"")
+		if err != nil {
+			return fmt.Errorf(""failed to create temporary folder to clone package configs into: %w"", err)
+		}
+		if o.DryRun {
+			o.Logger.Printf(""using working directory %s"", tempDir)
+		} else {
+			defer os.Remove(tempDir)
+		}
+
+		cloneOpts := &git.CloneOptions{
+			URL:               o.RepoURI,
+			Progress:          os.Stdout,
+			RecurseSubmodules: git.DefaultSubmoduleRecursionDepth,
+			ShallowSubmodules: true,
+			Auth:              wgit.GetGitAuth(),
+			Depth:             1,
+		}
+
+		repo, err = git.PlainClone(tempDir, false, cloneOpts)
+		if err != nil {
+			return fmt.Errorf(""failed to clone repository %s into %s: %w"", o.RepoURI, tempDir, err)
+		}
+
+		// get the latest upstream versions available
+		if latestVersions == nil {
+			latestVersions, err = o.GetLatestVersions(ctx, tempDir, o.PackageNames)
+			if err != nil {
+				return fmt.Errorf(""failed to get package updates: %w"", err)
+			}
+		}
+
+		// compare latest upstream versions with melange package versions and return a map of packages to update
+		if o.PackagesToUpdate == nil {
+			o.PackagesToUpdate, err = o.getPackagesToUpdate(latestVersions)
+			if err != nil {
+				return fmt.Errorf(""failed to get package updates: %w"", err)
+			}
+
+			// skip packages for which we already have an open issue or pull request
+			err = o.removeExistingUpdates(ctx, repo)
+			if err != nil {
+				return fmt.Errorf(""failed to get package updates: %w"", err)
+			}
+		}
+
+		// update melange configs in our cloned git repository with any new package versions
+		err = o.updatePackagesGitRepository(ctx, repo)
+		if err != nil {
+			// we occasionally get errors when pushing to git and creating issues, so we should retry using a clean clone
+			o.Logger.Printf(""attempt %d: failed to update packages in git repository: %s"", i+1, err)
+			continue
+		}
+
+		// If we reach here, it means the task has been successful and we can break the loop
+		break
+	}
+
+	// Check if an error still exists after the loop (i.e., all retry attempts failed)
+	if err != nil {
+		return fmt.Errorf(""after %d attempts, failed to update packages in git repository: %w"", o.MaxRetries, err)
+	}
+
+	// certain errors should not halt the updates, either create a GitHub Issue or print them
+	for k, message := range o.ErrorMessages {
+		// don't create an issue if we get an error about a missing git object
+		// this happens intermittently and tends to recover on the next run
+		// not able to reproduce locally, only seems to happen in GitHub Actions
+		if strings.Contains(message, ""failed to git push: object not found"") {
+			o.Logger.Printf(""%s: %s\n"", k, color.RedString(message))
+			continue
+		}
+		if o.CreateIssues {
+			issueURL, err := o.createErrorMessageIssue(ctx, repo, k, message)
+			if err != nil {
+				return err
+			}
+			o.Logger.Printf(""%s: %s\n"", k, color.YellowString(issueURL))
+		} else {
+			o.Logger.Printf(""%s: %s\n"", k, color.YellowString(message))
+		}
+	}
+
+	return nil
+}",1
+"func mainExitCode() int {
+	defer func() {
+		// log error in case of panic()
+		if err := recover(); err != nil {
+			log.Errorf(""program panicked: %s"", err)
+			log.Errorf(""Stack: %s"", debug.Stack())
+		}
+	}()
+
+	var err error
+	start := time.Now()
+
+	versionFlag := flag.Bool(""version"", false, ""show version number and exit"")
+	flag.Usage = usage
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Fprintf(os.Stderr, ""sshproxy version %s\n"", SshproxyVersion)
+		return 0
+	}
+
+	configFile := defaultConfig
+	if flag.NArg() != 0 {
+		configFile = flag.Arg(0)
+	}
+
+	currentUser, err := user.Current()
+	if err != nil {
+		log.Fatalf(""Cannot find current user: %s"", err)
+	}
+	username := currentUser.Username
+
+	sshConnection := os.Getenv(""SSH_CONNECTION"")
+	if sshConnection == """" {
+		log.Fatal(""No SSH_CONNECTION environment variable"")
+	}
+
+	sshInfos, err := NewSSHInfo(sshConnection)
+	if err != nil {
+		log.Fatalf(""parsing SSH_CONNECTION '%s': %s"", sshConnection, err)
+	}
+
+	conninfo := &ConnInfo{
+		Start: start,
+		User:  username,
+		SSH:   sshInfos,
+	}
+
+	sid := utils.CalcSessionID(conninfo.User, conninfo.Start, conninfo.SSH.Src())
+
+	groups, err := utils.GetGroups()
+	if err != nil {
+		log.Fatalf(""Cannot find current user groups: %s"", err)
+	}
+
+	config, err := utils.LoadConfig(configFile, username, sid, start, groups)
+	if err != nil {
+		log.Fatalf(""Reading configuration '%s': %s"", configFile, err)
+	}
+
+	logformat := fmt.Sprintf(""%%{time:2006-01-02 15:04:05} %%{level} %s: %%{message}"", sid)
+	syslogformat := fmt.Sprintf(""%%{level} %s: %%{message}"", sid)
+	utils.MustSetupLogging(""sshproxy"", config.Log, logformat, syslogformat, config.Debug)
+
+	for _, configLine := range utils.PrintConfig(config, groups) {
+		log.Debug(configLine)
+	}
+
+	log.Infof(""%s connected from %s to sshd listening on %s"", username, sshInfos.Src(), sshInfos.Dst())
+	defer log.Info(""disconnected"")
+
+	cli, err := utils.NewEtcdClient(config, log)
+	if err != nil {
+		log.Errorf(""Cannot contact etcd cluster to update state: %v"", err)
+	}
+
+	if cli != nil && cli.IsAlive() {
+		if config.MaxConnectionsPerUser > 0 {
+			userConnectionsCount, err := cli.GetUserConnectionsCount(username)
+			if err != nil {
+				log.Fatalf(""Getting user connections count: %s"", err)
+			}
+			log.Debugf(""Number of connections of %s: %d"", username, userConnectionsCount)
+			if userConnectionsCount >= config.MaxConnectionsPerUser {
+				fmt.Fprintln(os.Stderr, ""Too many simultaneous connections"")
+				log.Fatalf(""Max connections per user reached for %s"", username)
+			}
+		}
+	} else {
+		if config.Etcd.Mandatory {
+			log.Fatal(""Etcd is mandatory but unavailable"")
+		}
+	}
+
+	service, hostport, forceCommand, commandMustMatch, etcdKeyTTL, environment, err := findDestination(cli, username, config.Routes, sshInfos.Dst(), config.CheckInterval)
+	switch {
+	case err != nil:
+		log.Fatalf(""Finding destination: %s"", err)
+	case hostport == """":
+		errorBanner := """"
+		if cli != nil && cli.IsAlive() {
+			errorBanner, _, _ = cli.GetErrorBanner()
+		}
+		if errorBanner == """" {
+			errorBanner = config.ErrorBanner
+		}
+		if errorBanner != """" {
+			fmt.Println(errorBanner)
+		}
+		log.Fatal(""Cannot find a valid destination"")
+	}
+	host, port, err := utils.SplitHostPort(hostport)
+	if err != nil {
+		log.Fatalf(""Invalid destination '%s': %s"", hostport, err)
+	}
+
+	log.Debugf(""service = %s"", service)
+
+	// merge service environment with global environment
+	for k, v := range environment {
+		config.Environment[k] = v
+	}
+	setEnvironment(config.Environment)
+
+	// waitgroup and channel to stop our background command when exiting.
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+
+	sigChannel := make(chan os.Signal, 1)
+	signal.Notify(sigChannel, os.Interrupt, syscall.SIGHUP, syscall.SIGTERM)
+	go func() {
+		s := <-sigChannel
+		log.Infof(""Got signal %s, exiting"", s)
+		cancel()
+	}()
+
+	var etcdPath string
+	var tmpKeepAliveChan <-chan *clientv3.LeaseKeepAliveResponse
+	// Register destination in etcd and keep it alive while running.
+	if cli != nil && cli.IsAlive() {
+		key := fmt.Sprintf(""%s@%s"", username, service)
+		keepAliveChan, eP, err := cli.SetDestination(ctx, key, sshInfos.Dst(), hostport, etcdKeyTTL)
+		etcdPath = eP
+		if err != nil {
+			log.Warningf(""setting destination in etcd: %v"", err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case isChanAlive := <-keepAliveChan:
+					if isChanAlive == nil {
+						cli.Disable()
+						tmpKeepAliveChan, err = cli.NewLease(ctx)
+						if err != nil {
+							log.Warningf(""getting a new lease in etcd: %v"", err)
+						} else {
+							keepAliveChan = tmpKeepAliveChan
+							cli.Enable()
+						}
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// launch background command
+	if config.BgCommand != """" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := prepareBackgroundCommand(ctx, config.BgCommand, config.Debug)
+			if _, err := runCommand(cmd, false); err != nil {
+				select {
+				case <-ctx.Done():
+					// stay silent as the session is now finished
+				default:
+					log.Errorf(""error running background command: %s"", err)
+				}
+			}
+		}()
+	}
+
+	// Launch goroutine which exits sshproxy if it's attached to PID 1
+	// (which means its ssh parent connection is dead).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-time.After(1 * time.Second):
+				if os.Getppid() == 1 {
+					log.Warning(""SSH parent connection is dead"")
+					cancel()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	originalCmd := os.Getenv(""SSH_ORIGINAL_COMMAND"")
+	log.Debugf(""original command = %s"", originalCmd)
+
+	interactiveCommand := term.IsTerminal(os.Stdout.Fd())
+	log.Debugf(""interactiveCommand = %v"", interactiveCommand)
+
+	sshArgs := config.SSH.Args
+	envSshproxyArgs := strings.Fields(os.Getenv(""SSHPROXY_ARGS""))
+	if len(envSshproxyArgs) != 0 {
+		sshArgs = append(sshArgs, envSshproxyArgs...)
+	}
+	if port != utils.DefaultSSHPort {
+		sshArgs = append(sshArgs, ""-p"", port)
+	}
+	doCmd := """"
+	if forceCommand != """" {
+		log.Debugf(""forceCommand = %s"", forceCommand)
+		doCmd = forceCommand
+	} else if originalCmd != """" {
+		doCmd = originalCmd
+	}
+	commandTranslated := false
+	if doCmd != """" {
+		if commandMustMatch && originalCmd != doCmd {
+			log.Errorf(""error executing proxied ssh command: originalCmd \""%s\"" does not match forceCommand \""%s\"""", originalCmd, forceCommand)
+			return 1
+		}
+		for fromCmd, translateCmdConf := range config.TranslateCommands {
+			if doCmd == fromCmd {
+				log.Debugf(""translateCmdConf = %+v"", translateCmdConf)
+				sshArgs = append(sshArgs, translateCmdConf.SSHArgs...)
+				sshArgs = append(sshArgs, ""--"", host, translateCmdConf.Command)
+				if config.Dump != """" && translateCmdConf.DisableDump {
+					config.Dump = ""etcd""
+				}
+				commandTranslated = true
+				break
+			}
+		}
+		if !commandTranslated {
+			if interactiveCommand {
+				// Force TTY allocation because the user probably asked for it.
+				sshArgs = append(sshArgs, ""-t"")
+			}
+			sshArgs = append(sshArgs, host, doCmd)
+		}
+	} else {
+		sshArgs = append(sshArgs, host)
+	}
+	cmd := exec.CommandContext(ctx, config.SSH.Exe, sshArgs...)
+	log.Debugf(""command = %s %q"", cmd.Path, cmd.Args)
+
+	var recorder *Recorder
+	if config.Dump != """" {
+		recorder = NewRecorder(conninfo, config.Dump, doCmd, config.EtcdStatsInterval.Duration(), config.LogStatsInterval.Duration(), config.DumpLimitSize, config.DumpLimitWindow.Duration())
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recorder.Run(ctx, cli, etcdPath)
+		}()
+	}
+
+	log.Infof(""proxied to %s (service: %s)"", hostport, service)
+
+	var rc int
+	if interactiveCommand {
+		rc, err = runTtyCommand(cmd, recorder)
+	} else {
+		rc, err = runStdCommand(cmd, recorder)
+	}
+	if err != nil {
+		log.Errorf(""error executing proxied ssh command: %s"", err)
+	}
+
+	// return command exit code
+	return rc
+}",1
+"func (bb *basicBlock) Succs() int {
+	return len(bb.success)
+}",0
+"	err := downloader.GetURI(url, func(_ string, i []byte) error {
+		return yaml.Unmarshal(i, &remoteLibrary)
+	})",1
+"func (t Type) invalid() bool {
+	return t == typeInvalid
+}",0
+"func Validate(charset Charset, input []byte) bool {
+	if charset, ok := charset.(interface{ Validate([]byte) bool }); ok {
+		return charset.Validate(input)
+	}
+	for len(input) > 0 {
+		r, size := charset.DecodeRune(input)
+		if r == RuneError && size < 2 {
+			return false
+		}
+		input = input[size:]
+	}
+	return true
+}",1
+"func lower32willSignExtendTo64(x uint64) bool {
+	xs := int64(x)
+	return xs == int64(uint64(int32(xs)))
+}",0
+"func CookieNameFromDomain(domain string) string {
+	// replace all non-word characters with underscores
+	derived := regexp.MustCompile(`[\W_]+`).ReplaceAllString(domain, ""_"")
+	return ""_"" + derived + ""_jwt2_""
+}",1
+"func ExitCodeCallGoFunctionWithIndex(index int, withListener bool) ExitCode {
+	if withListener {
+		return ExitCodeCallGoFunctionWithListener | ExitCode(index<<8)
+	}
+	return ExitCodeCallGoFunction | ExitCode(index<<8)
+}",0
+"func (m *ModuleContextOffsetData) LocalMemoryLen() Offset {
+	if l := m.LocalMemoryBegin; l >= 0 {
+		return l + 8
+	}
+	return -1
+}",0
+"func TestHandler_HandleMalfeasanceProof_InvalidPostIndex(t *testing.T) {
+	sig, err := signing.NewEdSigner()
+	require.NoError(t, err)
+	nodeIdH32 := types.Hash32(sig.NodeID())
+	id := sig.NodeID()
+	atx := awire.ActivationTxV1{
+		InnerActivationTxV1: awire.InnerActivationTxV1{
+			NIPostChallengeV1: awire.NIPostChallengeV1{
+				CommitmentATX: &types.ATXID{1, 2, 3},
+			},
+			NIPost: &awire.NIPostV1{
+				Post:         &awire.PostV1{},
+				PostMetadata: &awire.PostMetadataV1{},
+			},
+		},
+		SmesherID: id,
+	}
+	atx.Signature = sig.Sign(signing.ATX, atx.SignedBytes())
+
+	t.Run(""valid malfeasance proof"", func(t *testing.T) {
+		db := sql.InMemory()
+		lg := logtest.New(t)
+		trt := malfeasance.NewMocktortoise(gomock.NewController(t))
+		postVerifier := malfeasance.NewMockpostVerifier(gomock.NewController(t))
+
+		h := malfeasance.NewHandler(
+			datastore.NewCachedDB(db, lg),
+			lg,
+			""self"",
+			[]types.NodeID{types.RandomNodeID()},
+			signing.NewEdVerifier(),
+			trt,
+			postVerifier,
+		)
+
+		proof := wire.MalfeasanceProof{
+			Layer: types.LayerID(11),
+			Proof: wire.Proof{
+				Type: wire.InvalidPostIndex,
+				Data: &wire.InvalidPostIndexProof{
+					Atx:        atx,
+					InvalidIdx: 7,
+				},
+			},
+		}
+
+		postVerifier.EXPECT().Verify(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(errors.New(""invalid""))
+		trt.EXPECT().OnMalfeasance(sig.NodeID())
+		err := h.HandleSyncedMalfeasanceProof(context.Background(), nodeIdH32, ""peer"", codec.MustEncode(&proof))
+		require.NoError(t, err)
+
+		malicious, err := identities.IsMalicious(db, sig.NodeID())
+		require.NoError(t, err)
+		require.True(t, malicious)
+	})
+
+	t.Run(""invalid malfeasance proof (POST valid)"", func(t *testing.T) {
+		db := sql.InMemory()
+		lg := logtest.New(t)
+		trt := malfeasance.NewMocktortoise(gomock.NewController(t))
+		postVerifier := malfeasance.NewMockpostVerifier(gomock.NewController(t))
+
+		h := malfeasance.NewHandler(
+			datastore.NewCachedDB(db, lg),
+			lg,
+			""self"",
+			[]types.NodeID{types.RandomNodeID()},
+			signing.NewEdVerifier(),
+			trt,
+			postVerifier,
+		)
+
+		proof := wire.MalfeasanceProof{
+			Layer: types.LayerID(11),
+			Proof: wire.Proof{
+				Type: wire.InvalidPostIndex,
+				Data: &wire.InvalidPostIndexProof{
+					Atx:        atx,
+					InvalidIdx: 7,
+				},
+			},
+		}
+
+		postVerifier.EXPECT().Verify(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+		err := h.HandleSyncedMalfeasanceProof(context.Background(), nodeIdH32, ""peer"", codec.MustEncode(&proof))
+		require.ErrorIs(t, err, pubsub.ErrValidationReject)
+
+		malicious, err := identities.IsMalicious(db, sig.NodeID())
+		require.NoError(t, err)
+		require.False(t, malicious)
+	})
+
+	t.Run(""invalid malfeasance proof (ATX signature invalid)"", func(t *testing.T) {
+		db := sql.InMemory()
+		lg := logtest.New(t)
+		trt := malfeasance.NewMocktortoise(gomock.NewController(t))
+		postVerifier := malfeasance.NewMockpostVerifier(gomock.NewController(t))
+
+		h := malfeasance.NewHandler(
+			datastore.NewCachedDB(db, lg),
+			lg,
+			""self"",
+			[]types.NodeID{types.RandomNodeID()},
+			signing.NewEdVerifier(),
+			trt,
+			postVerifier,
+		)
+
+		atx := atx
+		atx.NIPost.Post.Pow += 1 // invalidate signature by changing content
+
+		proof := wire.MalfeasanceProof{
+			Layer: types.LayerID(11),
+			Proof: wire.Proof{
+				Type: wire.InvalidPostIndex,
+				Data: &wire.InvalidPostIndexProof{
+					Atx:        atx,
+					InvalidIdx: 7,
+				},
+			},
+		}
+
+		err := h.HandleSyncedMalfeasanceProof(context.Background(), nodeIdH32, ""peer"", codec.MustEncode(&proof))
+		require.ErrorIs(t, err, pubsub.ErrValidationReject)
+		require.ErrorContains(t, err, ""invalid signature"")
+
+		malicious, err := identities.IsMalicious(db, sig.NodeID())
+		require.NoError(t, err)
+		require.False(t, malicious)
+	})
+}",1
+"func (i *instruction) asXmmRmRImm(op sseOpcode, imm uint8, rm operand, rd regalloc.VReg) *instruction {
+	if rm.kind != operandKindReg && rm.kind != operandKindMem {
+		panic(""BUG"")
+	}
+	i.kind = xmmRmRImm
+	i.op1 = rm
+	i.op2 = newOperandReg(rd)
+	i.u1 = uint64(op)
+	i.u2 = uint64(imm)
+	return i
+}",0
+"func (g *Registry) CheckOptions(domain string, option types.RegistryOptions) error {
+	if !strings.HasSuffix(domain, gcrURL) && !strings.HasSuffix(domain, garURL) {
+		return xerrors.Errorf(""Google registry: %w"", types.InvalidURLPattern)
+	}
+	g.domain = domain
+	if option.GCPCredPath != """" {
+		g.Store = store.NewGCRCredStore(option.GCPCredPath)
+	}
+	return nil
+}",1
+"func (i *instruction) asLoadPair64(src1, src2 regalloc.VReg, amode addressMode) {
+	i.kind = loadP64
+	i.rn = operandNR(src1)
+	i.rm = operandNR(src2)
+	i.amode = amode
+}",0
+"func (s *Server) Get(ctx context.Context, q *settingspkg.SettingsQuery) (*settingspkg.Settings, error) {
+	resourceOverrides, err := s.mgr.GetResourceOverrides()
+	if err != nil {
+		return nil, err
+	}
+	overrides := make(map[string]*v1alpha1.ResourceOverride)
+	for k := range resourceOverrides {
+		val := resourceOverrides[k]
+		overrides[k] = &val
+	}
+	appInstanceLabelKey, err := s.mgr.GetAppInstanceLabelKey()
+	if err != nil {
+		return nil, err
+	}
+	argoCDSettings, err := s.mgr.GetSettings()
+	if err != nil {
+		return nil, err
+	}
+	gaSettings, err := s.mgr.GetGoogleAnalytics()
+	if err != nil {
+		return nil, err
+	}
+	help, err := s.mgr.GetHelp()
+	if err != nil {
+		return nil, err
+	}
+	userLoginsDisabled := true
+	accounts, err := s.mgr.GetAccounts()
+	if err != nil {
+		return nil, err
+	}
+	for _, account := range accounts {
+		if account.Enabled && account.HasCapability(settings.AccountCapabilityLogin) {
+			userLoginsDisabled = false
+			break
+		}
+	}
+
+	kustomizeSettings, err := s.mgr.GetKustomizeSettings()
+	if err != nil {
+		return nil, err
+	}
+	var kustomizeVersions []string
+	for i := range kustomizeSettings.Versions {
+		kustomizeVersions = append(kustomizeVersions, kustomizeSettings.Versions[i].Name)
+	}
+
+	trackingMethod, err := s.mgr.GetTrackingMethod()
+	if err != nil {
+		return nil, err
+	}
+
+	set := settingspkg.Settings{
+		URL:                argoCDSettings.URL,
+		AppLabelKey:        appInstanceLabelKey,
+		ResourceOverrides:  overrides,
+		StatusBadgeEnabled: argoCDSettings.StatusBadgeEnabled,
+		StatusBadgeRootUrl: argoCDSettings.StatusBadgeRootUrl,
+		KustomizeOptions: &v1alpha1.KustomizeOptions{
+			BuildOptions: argoCDSettings.KustomizeBuildOptions,
+		},
+		GoogleAnalytics: &settingspkg.GoogleAnalyticsConfig{
+			TrackingID:     gaSettings.TrackingID,
+			AnonymizeUsers: gaSettings.AnonymizeUsers,
+		},
+		Help: &settingspkg.Help{
+			ChatUrl:    help.ChatURL,
+			ChatText:   help.ChatText,
+			BinaryUrls: help.BinaryURLs,
+		},
+		UserLoginsDisabled:        userLoginsDisabled,
+		KustomizeVersions:         kustomizeVersions,
+		UiCssURL:                  argoCDSettings.UiCssURL,
+		TrackingMethod:            trackingMethod,
+		ExecEnabled:               argoCDSettings.ExecEnabled,
+		AppsInAnyNamespaceEnabled: s.appsInAnyNamespaceEnabled,
+	}
+
+	if sessionmgr.LoggedIn(ctx) || s.disableAuth {
+		set.UiBannerContent = argoCDSettings.UiBannerContent
+		set.UiBannerURL = argoCDSettings.UiBannerURL
+		set.UiBannerPermanent = argoCDSettings.UiBannerPermanent
+		set.UiBannerPosition = argoCDSettings.UiBannerPosition
+		set.ControllerNamespace = s.mgr.GetNamespace()
+	}
+	if sessionmgr.LoggedIn(ctx) {
+		set.PasswordPattern = argoCDSettings.PasswordPattern
+	}
+	if argoCDSettings.DexConfig != """" {
+		var cfg settingspkg.DexConfig
+		err = yaml.Unmarshal([]byte(argoCDSettings.DexConfig), &cfg)
+		if err == nil {
+			set.DexConfig = &cfg
+		}
+	}
+	if oidcConfig := argoCDSettings.OIDCConfig(); oidcConfig != nil {
+		set.OIDCConfig = &settingspkg.OIDCConfig{
+			Name:                     oidcConfig.Name,
+			Issuer:                   oidcConfig.Issuer,
+			ClientID:                 oidcConfig.ClientID,
+			CLIClientID:              oidcConfig.CLIClientID,
+			Scopes:                   oidcConfig.RequestedScopes,
+			EnablePKCEAuthentication: oidcConfig.EnablePKCEAuthentication,
+		}
+		if len(argoCDSettings.OIDCConfig().RequestedIDTokenClaims) > 0 {
+			set.OIDCConfig.IDTokenClaims = argoCDSettings.OIDCConfig().RequestedIDTokenClaims
+		}
+	}
+	return &set, nil
+}",0
+"func (Charset_utf32) DecodeRune(p []byte) (rune, int) {
+	if len(p) < 4 {
+		return utf8.RuneError, 0
+	}
+	return (rune(p[0]) << 24) | (rune(p[1]) << 16) | (rune(p[2]) << 8) | rune(p[3]), 4
+}",1
+"	err := downloader.GetURI(url, func(url string, d []byte) error {
+		refFile = string(d)
+		if len(refFile) == 0 {
+			return fmt.Errorf(""invalid reference file at url %s: %s"", url, d)
+		}
+		cutPoint := strings.LastIndex(url, ""/"")
+		refFile = url[:cutPoint+1] + refFile
+		return nil
+	})",1
+"func (h *Handler) HandleSyncedMalfeasanceProof(
+	ctx context.Context,
+	expHash types.Hash32,
+	_ p2p.Peer,
+	data []byte,
+) error {
+	var p wire.MalfeasanceProof
+	if err := codec.Decode(data, &p); err != nil {
+		numMalformed.Inc()
+		h.logger.With().Error(""malformed message (sync)"", log.Context(ctx), log.Err(err))
+		return errMalformedData
+	}
+	nodeID, err := h.validateAndSave(ctx, &wire.MalfeasanceGossip{MalfeasanceProof: p})
+	if err == nil && types.Hash32(nodeID) != expHash {
+		return fmt.Errorf(
+			""%w: malfesance proof want %s, got %s"",
+			errWrongHash,
+			expHash.ShortString(),
+			nodeID.ShortString(),
+		)
+	}
+	return err
+}",1
+"func GetURI(url string, f func(url string, i []byte) error) error {
+	url = ConvertURL(url)
+
+	if strings.HasPrefix(url, ""file://"") {
+		rawURL := strings.TrimPrefix(url, ""file://"")
+		// checks if the file is symbolic, and resolve if so - otherwise, this function returns the path unmodified.
+		resolvedFile, err := filepath.EvalSymlinks(rawURL)
+		if err != nil {
+			return err
+		}
+		// Read the response body
+		body, err := os.ReadFile(resolvedFile)
+		if err != nil {
+			return err
+		}
+
+		// Unmarshal YAML data into a struct
+		return f(url, body)
+	}
+
+	// Send a GET request to the URL
+	response, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	// Read the response body
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+
+	// Unmarshal YAML data into a struct
+	return f(url, body)
+}",1
+"func (i *Instruction) AsBxor(x, amount Value) {
+	i.opcode = OpcodeBxor
+	i.v = x
+	i.v2 = amount
+	i.typ = x.Type()
+}",0
+"func (i *Instruction) AsUExtend(v Value, from, to byte) *Instruction {
+	i.opcode = OpcodeUExtend
+	i.v = v
+	i.u1 = uint64(from)<<8 | uint64(to)
+	if to == 64 {
+		i.typ = TypeI64
+	} else {
+		i.typ = TypeI32
+	}
+	return i
+}",0
+"func (o *PackageOptions) UpdatePackageCmd(ctx context.Context) error {
+	// clone the melange config git repo into a temp folder so we can work with it
+	tempDir, err := os.MkdirTemp("""", ""wolfictl"")
+	if err != nil {
+		return fmt.Errorf(""failed to create temporary folder to clone package configs into: %w"", err)
+	}
+	if o.DryRun {
+		o.Logger.Printf(""using working directory %s"", tempDir)
+	} else {
+		defer os.Remove(tempDir)
+	}
+
+	cloneOpts := &git.CloneOptions{
+		URL:               o.TargetRepo,
+		Progress:          os.Stdout,
+		RecurseSubmodules: git.NoRecurseSubmodules,
+		Auth:              wolfigit.GetGitAuth(),
+		Depth:             1,
+	}
+
+	repo, err := git.PlainClone(tempDir, false, cloneOpts)
+	if err != nil {
+		return fmt.Errorf(""failed to clone repository %s into %s: %w"", o.TargetRepo, tempDir, err)
+	}
+
+	// first, let's get the melange package(s) from the target git repo, that we want to check for updates
+	o.PackageConfig, err = melange.ReadPackageConfigs(ctx, []string{o.PackageName}, tempDir)
+	if err != nil {
+		return fmt.Errorf(""failed to get package config for package name %s: %w"", o.PackageName, err)
+	}
+
+	uo := New(ctx)
+	uo.PackageConfigs = o.PackageConfig
+	uo.DryRun = o.DryRun
+	uo.PullRequestBaseBranch = o.PullRequestBaseBranch
+	uo.PullRequestTitle = ""%s/%s package update""
+	uo.UseGitSign = o.UseGitSign
+
+	// let's work on a branch when updating package versions, so we can create a PR from that branch later
+	ref, err := uo.createBranch(repo)
+	if err != nil {
+		return fmt.Errorf(""failed to switch to working git branch: %w"", err)
+	}
+
+	// optionally update advisories based on commit since the previous release
+	if o.Advisories {
+		err := o.updateAdvisories(ctx, repo)
+		if err != nil {
+			return fmt.Errorf(""failed to update advisories: %w"", err)
+		}
+	}
+
+	// update melange configs in our cloned git repository with any new package versions
+	v := strings.TrimPrefix(o.Version, ""v"")
+
+	nvr := NewVersionResults{
+		Version: v,
+	}
+	errorMessage, err := uo.updateGitPackage(ctx, repo, o.PackageName, nvr, ref)
+	if err != nil {
+		return fmt.Errorf(""failed to update package in git repository: %w"", err)
+	}
+	if errorMessage != """" {
+		return errors.New(errorMessage)
+	}
+	return nil
+}",1
+"func (i *instruction) asMulHi(rm operand, signed, _64 bool) *instruction {
+	if rm.kind != operandKindReg && (rm.kind != operandKindMem) {
+		panic(""BUG"")
+	}
+	i.kind = mulHi
+	i.op1 = rm
+	i.b1 = _64
+	if signed {
+		i.u1 = 1
+	}
+	return i
+}",0
+"func (s *httpdServer) listenAndServe() error {
+	s.initializeRouter()
+	httpServer := &http.Server{
+		Handler:           s.router,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 16, // 64KB
+		ErrorLog:          log.New(&logger.StdLoggerWrapper{Sender: logSender}, """", 0),
+	}
+	if certMgr != nil && s.binding.EnableHTTPS {
+		certID := common.DefaultTLSKeyPaidID
+		if getConfigPath(s.binding.CertificateFile, """") != """" && getConfigPath(s.binding.CertificateKeyFile, """") != """" {
+			certID = s.binding.GetAddress()
+		}
+		config := &tls.Config{
+			GetCertificate: certMgr.GetCertificateFunc(certID),
+			MinVersion:     util.GetTLSVersion(s.binding.MinTLSVersion),
+			NextProtos:     util.GetALPNProtocols(s.binding.Protocols),
+			CipherSuites:   util.GetTLSCiphersFromNames(s.binding.TLSCipherSuites),
+		}
+		httpServer.TLSConfig = config
+		logger.Debug(logSender, """", ""configured TLS cipher suites for binding %q: %v, certID: %v"",
+			s.binding.GetAddress(), httpServer.TLSConfig.CipherSuites, certID)
+		if s.binding.ClientAuthType == 1 {
+			httpServer.TLSConfig.ClientCAs = certMgr.GetRootCAs()
+			httpServer.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			httpServer.TLSConfig.VerifyConnection = s.verifyTLSConnection
+		}
+		return util.HTTPListenAndServe(httpServer, s.binding.Address, s.binding.Port, true, logSender)
+	}
+	return util.HTTPListenAndServe(httpServer, s.binding.Address, s.binding.Port, false, logSender)
+}",1
+"func (i *instruction) asUD2() *instruction {
+	i.kind = ud2
+	return i
+}",0
+"func (s *PrecompileTestSuite) FundTestClawbackVestingAccount() {
+	method := s.precompile.Methods[vesting.FundVestingAccountMethod]
+	createArgs := []interface{}{s.address, toAddr, uint64(time.Now().Unix()), lockupPeriods, vestingPeriods}
+	//nolint
+	msg, _, _, _, _, err := vesting.NewMsgFundVestingAccount(createArgs, &method)
+	_, err = s.app.VestingKeeper.FundVestingAccount(s.ctx, msg)
+	s.Require().NoError(err)
+	vestingAcc, err := s.app.VestingKeeper.Balances(s.ctx, &vestingtypes.QueryBalancesRequest{Address: sdk.AccAddress(toAddr.Bytes()).String()})
+	s.Require().NoError(err)
+	s.Require().Equal(vestingAcc.Locked, balancesSdkCoins)
+	s.Require().Equal(vestingAcc.Unvested, balancesSdkCoins)
+}",1
+"func NewDecoder() *Decoder {
+	return &Decoder{cache: newCache()}
+}",1
+"func (o *operand) format(_64 bool) string {
+	switch o.kind {
+	case operandKindReg:
+		return formatVRegSized(o.reg(), _64)
+	case operandKindMem:
+		return o.addressMode().String()
+	case operandKindImm32:
+		return fmt.Sprintf(""$%d"", int32(o.imm32()))
+	case operandKindLabel:
+		return backend.Label(o.imm32()).String()
+	default:
+		panic(fmt.Sprintf(""BUG: invalid operand: %s"", o.kind))
+	}
+}",0
+"func (c *compiler) assignVirtualRegisters() {
+	builder := c.ssaBuilder
+	refCounts := builder.ValueRefCounts()
+	c.ssaValueRefCounts = refCounts
+
+	need := len(refCounts)
+	if need >= len(c.ssaValueToVRegs) {
+		c.ssaValueToVRegs = append(c.ssaValueToVRegs, make([]regalloc.VReg, need+1)...)
+	}
+	if need >= len(c.ssaValueDefinitions) {
+		c.ssaValueDefinitions = append(c.ssaValueDefinitions, make([]SSAValueDefinition, need+1)...)
+	}
+
+	for blk := builder.BlockIteratorReversePostOrderBegin(); blk != nil; blk = builder.BlockIteratorReversePostOrderNext() {
+		// First we assign a virtual register to each parameter.
+		for i := 0; i < blk.Params(); i++ {
+			p := blk.Param(i)
+			pid := p.ID()
+			typ := p.Type()
+			vreg := c.AllocateVReg(typ)
+			c.ssaValueToVRegs[pid] = vreg
+			c.ssaValueDefinitions[pid] = SSAValueDefinition{BlockParamValue: p, BlkParamVReg: vreg}
+			c.ssaTypeOfVRegID[vreg.ID()] = p.Type()
+		}
+
+		// Assigns each value to a virtual register produced by instructions.
+		for cur := blk.Root(); cur != nil; cur = cur.Next() {
+			r, rs := cur.Returns()
+			var N int
+			if r.Valid() {
+				id := r.ID()
+				ssaTyp := r.Type()
+				typ := r.Type()
+				vReg := c.AllocateVReg(typ)
+				c.ssaValueToVRegs[id] = vReg
+				c.ssaValueDefinitions[id] = SSAValueDefinition{
+					Instr:    cur,
+					N:        0,
+					RefCount: refCounts[id],
+				}
+				c.ssaTypeOfVRegID[vReg.ID()] = ssaTyp
+				N++
+			}
+			for _, r := range rs {
+				id := r.ID()
+				ssaTyp := r.Type()
+				vReg := c.AllocateVReg(ssaTyp)
+				c.ssaValueToVRegs[id] = vReg
+				c.ssaValueDefinitions[id] = SSAValueDefinition{
+					Instr:    cur,
+					N:        N,
+					RefCount: refCounts[id],
+				}
+				c.ssaTypeOfVRegID[vReg.ID()] = ssaTyp
+				N++
+			}
+		}
+	}
+
+	for i, retBlk := 0, builder.ReturnBlock(); i < retBlk.Params(); i++ {
+		typ := retBlk.Param(i).Type()
+		vReg := c.AllocateVReg(typ)
+		c.returnVRegs = append(c.returnVRegs, vReg)
+		c.ssaTypeOfVRegID[vReg.ID()] = typ
+	}
+}",0
+"func (o *Options) proposeChanges(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, packageName string, newVersion NewVersionResults) (string, error) {
+	gitURL, err := wgit.GetRemoteURL(repo)
+	if err != nil {
+		return """", fmt.Errorf(""failed to find git origin URL: %w"", err)
+	}
+
+	basePullRequest := gh.BasePullRequest{
+		RepoName:              gitURL.Name,
+		Owner:                 gitURL.Organisation,
+		Branch:                ref.String(),
+		PullRequestBaseBranch: o.PullRequestBaseBranch,
+	}
+
+	client := github.NewClient(o.GitHubHTTPClient.Client)
+
+	gitOpts := gh.GitOptions{
+		GithubClient: client,
+		MaxRetries:   maxPullRequestRetries,
+		Logger:       o.Logger,
+	}
+
+	// commit the changes
+	if err = o.commitChanges(repo, packageName, newVersion.Version); err != nil {
+		return """", fmt.Errorf(""failed to commit changes: %w"", err)
+	}
+
+	// todo jr remove if this doesn't help
+	wt, err := repo.Worktree()
+	if err != nil {
+		return """", fmt.Errorf(""failed to get the worktree: %w"", err)
+	}
+	rs, err := debug(wt)
+	if err != nil {
+		return """", err
+	}
+	o.Logger.Printf(""proposeChanges: %s git status: %s"", packageName, string(rs))
+
+	// setup githubReleases auth using standard environment variables
+	pushOpts := &git.PushOptions{
+		RemoteName: ""origin"",
+		Auth:       wgit.GetGitAuth(),
+		Progress:   os.Stdout, // todo remove if this doesn't help: extra logging to help debug intermittent ""object not found"" when pushing
+	}
+
+	// push the version update changes to our working branch
+	if err := repo.Push(pushOpts); err != nil {
+		if err.Error() == ""authorization failed"" {
+			return """", fmt.Errorf(""failed to auth with git provider, does your personal access token have the repo scope? https://github.com/settings/tokens/new?scopes=repo: %w"", err)
+		}
+		return """", fmt.Errorf(""failed to git push: %w"", err)
+	}
+
+	// now let's create a pull request
+
+	// if we have a single version use it in the PR title, this might be a batch with multiple versions so default to a simple title
+	var title string
+	if newVersion.Version != """" {
+		title = fmt.Sprintf(o.PullRequestTitle, packageName, newVersion.Version)
+	} else {
+		title = fmt.Sprintf(o.PullRequestTitle, packageName, ""new versions"")
+	}
+
+	// Create an NewPullRequest struct which is used to create the real pull request from
+	newPR := &gh.NewPullRequest{
+		BasePullRequest: basePullRequest,
+		Title:           title,
+		Body:            wolfiImage,
+	}
+
+	// create the pull request
+	pr, err := gitOpts.OpenPullRequest(ctx, newPR)
+	prLink := pr.GetHTMLURL()
+	if err != nil {
+		return """", fmt.Errorf(""failed to create pull request: %w"", err)
+	}
+	err = gitOpts.LabelIssue(ctx, newPR.Owner, newPR.RepoName, *pr.Number, &o.IssueLabels)
+	if err != nil {
+		log.Printf(""Failed to apply labels [%s] to PR #%d"", strings.Join(o.IssueLabels, "",""), pr.Number)
+	}
+	if newVersion.ReplaceExistingPRNumber != 0 {
+		err = gitOpts.ClosePullRequest(ctx, gitURL.Organisation, gitURL.Name, newVersion.ReplaceExistingPRNumber)
+		if err != nil {
+			return """", fmt.Errorf(""failed to close pull request: %d: %w"", newVersion.ReplaceExistingPRNumber, err)
+		}
+
+		// comment on the closed PR the new pull request link which supersedes it
+		comment := fmt.Sprintf(""superseded by %s"", prLink)
+		_, err = gitOpts.CommentIssue(ctx, gitURL.Organisation, gitURL.Name, comment, newVersion.ReplaceExistingPRNumber)
+		if err != nil {
+			return """", fmt.Errorf(""failed to comment pull request: %d: %w"", newVersion.ReplaceExistingPRNumber, err)
+		}
+	}
+	return prLink, nil
+}",1
+"func TestRemoveSensitiveCookies(t *testing.T) {
+	var (
+		domain                  = ""test-domain.com""
+		sessionCookie           = &http.Cookie{Domain: domain, Name: ""_test_domain_com_"", Value: ""fobar""}
+		sessionCookieJwt2       = &http.Cookie{Domain: domain, Name: ""_test_domain_com_jwt2_"", Value: ""fobar""}
+		realGitpodSessionCookie = &http.Cookie{Domain: domain, Name: server_lib.CookieNameFromDomain(domain), Value: ""fobar""}
+		portAuthCookie          = &http.Cookie{Domain: domain, Name: ""_test_domain_com_ws_77f6b236_3456_4b88_8284_81ca543a9d65_port_auth_"", Value: ""some-token""}
+		ownerCookie             = &http.Cookie{Domain: domain, Name: ""_test_domain_com_ws_77f6b236_3456_4b88_8284_81ca543a9d65_owner_"", Value: ""some-other-token""}
+		ownerCookieGen          = ownerTokenCookie(domain, ""77f6b236_3456_4b88_8284_81ca543a9d65"", ""owner-token-gen"")
+		miscCookie              = &http.Cookie{Domain: domain, Name: ""some-other-cookie"", Value: ""I like cookies""}
+		invalidCookieName       = &http.Cookie{Domain: domain, Name: ""foobar[0]"", Value: ""violates RFC6266""}
+	)
+
+	tests := []struct {
+		Name     string
+		Input    []*http.Cookie
+		Expected []*http.Cookie
+	}{
+		{Name: ""no cookies"", Input: []*http.Cookie{}, Expected: []*http.Cookie{}},
+		{Name: ""session cookie"", Input: []*http.Cookie{sessionCookie, miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""session cookie ending on _jwt2_"", Input: []*http.Cookie{sessionCookieJwt2, miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""real Gitpod session cookie"", Input: []*http.Cookie{realGitpodSessionCookie, miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""portAuth cookie"", Input: []*http.Cookie{portAuthCookie, miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""owner cookie"", Input: []*http.Cookie{ownerCookie, miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""owner cookie generated"", Input: []*http.Cookie{ownerCookieGen, miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""misc cookie"", Input: []*http.Cookie{miscCookie}, Expected: []*http.Cookie{miscCookie}},
+		{Name: ""invalid cookie name"", Input: []*http.Cookie{invalidCookieName}, Expected: []*http.Cookie{invalidCookieName}},
+	}
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			res := removeSensitiveCookies(test.Input, domain)
+			if diff := cmp.Diff(test.Expected, res); diff != """" {
+				t.Errorf(""unexpected result (-want +got):\n%s"", diff)
+			}
+		})
+	}
+}",1
+"	applyModel := func(model *GalleryModel) error {
+		name = strings.ReplaceAll(name, string(os.PathSeparator), ""__"")
+
+		var config Config
+
+		if len(model.URL) > 0 {
+			var err error
+			config, err = GetGalleryConfigFromURL(model.URL)
+			if err != nil {
+				return err
+			}
+		} else if len(model.ConfigFile) > 0 {
+			// TODO: is this worse than using the override method with a blank cfg yaml?
+			reYamlConfig, err := yaml.Marshal(model.ConfigFile)
+			if err != nil {
+				return err
+			}
+			config = Config{
+				ConfigFile:  string(reYamlConfig),
+				Description: model.Description,
+				License:     model.License,
+				URLs:        model.URLs,
+				Name:        model.Name,
+				Files:       make([]File, 0), // Real values get added below, must be blank
+				// Prompt Template Skipped for now - I expect in this mode that they will be delivered as files.
+			}
+		} else {
+			return fmt.Errorf(""invalid gallery model %+v"", model)
+		}
+
+		installName := model.Name
+		if req.Name != """" {
+			installName = req.Name
+		}
+
+		// Copy the model configuration from the request schema
+		config.URLs = append(config.URLs, model.URLs...)
+		config.Icon = model.Icon
+		config.Files = append(config.Files, req.AdditionalFiles...)
+		config.Files = append(config.Files, model.AdditionalFiles...)
+
+		// TODO model.Overrides could be merged with user overrides (not defined yet)
+		if err := mergo.Merge(&model.Overrides, req.Overrides, mergo.WithOverride); err != nil {
+			return err
+		}
+
+		if err := InstallModel(basePath, installName, &config, model.Overrides, downloadStatus); err != nil {
+			return err
+		}
+
+		return nil
+	}",1
+"func (i *Instruction) AsFcvtFromInt(x Value, signed bool, dst64bit bool) *Instruction {
+	if signed {
+		i.opcode = OpcodeFcvtFromSint
+	} else {
+		i.opcode = OpcodeFcvtFromUint
+	}
+	i.v = x
+	if dst64bit {
+		i.typ = TypeF64
+	} else {
+		i.typ = TypeF32
+	}
+	return i
+}",0
+"func (Charset_utf16le) DecodeRune(b []byte) (rune, int) {
+	if len(b) < 2 {
+		return utf8.RuneError, 0
+	}
+
+	r1 := uint16(b[0]) | uint16(b[1])<<8
+	if r1 < surr1 || surr3 <= r1 {
+		return rune(r1), 2
+	}
+
+	if len(b) < 4 {
+		return utf8.RuneError, 0
+	}
+
+	r2 := uint16(b[2]) | uint16(b[3])<<8
+	if surr1 <= r1 && r1 < surr2 && surr2 <= r2 && r2 < surr3 {
+		return (rune(r1)-surr1)<<10 | (rune(r2) - surr2) + surrSelf, 4
+	}
+
+	return utf8.RuneError, 1
+}",1
+"func (p Precompile) CreateClawbackVestingAccount(
+	ctx sdk.Context,
+	origin common.Address,
+	stateDB vm.StateDB,
+	method *abi.Method,
+	args []interface{},
+) ([]byte, error) {
+	msg, funderAddr, vestingAddr, err := NewMsgCreateClawbackVestingAccount(args)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the origin matches the vesting address
+	if origin != vestingAddr {
+		return nil, fmt.Errorf(ErrDifferentFromOrigin, origin, vestingAddr)
+	}
+
+	p.Logger(ctx).Debug(
+		""tx called"",
+		""method"", method.Name,
+		""args"", fmt.Sprintf(""{ from_address: %s, to_address: %s }"", msg.FunderAddress, msg.VestingAddress),
+	)
+
+	_, err = p.vestingKeeper.CreateClawbackVestingAccount(sdk.WrapSDKContext(ctx), msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = p.EmitCreateClawbackVestingAccountEvent(ctx, stateDB, funderAddr, vestingAddr); err != nil {
+		return nil, err
+	}
+
+	return method.Outputs.Pack(true)
+}",1
+"func (m *machine) allocateInstr() *instruction {
+	instr := m.ectx.InstructionPool.Allocate()
+	if !m.regAllocStarted {
+		instr.addedBeforeRegAlloc = true
+	}
+	return instr
+}",0
+"	if err := h.cdb.WithTx(ctx, func(tx *sql.Tx) error {
+		if malicious {
+			if err := atxs.Add(tx, atx); err != nil && !errors.Is(err, sql.ErrObjectExists) {
+				return fmt.Errorf(""add atx to db: %w"", err)
+			}
+			return nil
+		}
+
+		prev, err := atxs.GetByEpochAndNodeID(tx, atx.PublishEpoch, atx.SmesherID)
+		if err != nil && !errors.Is(err, sql.ErrNotFound) {
+			return err
+		}
+
+		// do ID check to be absolutely sure.
+		if prev != nil && prev.ID() != atx.ID() {
+			if _, ok := h.signers[atx.SmesherID]; ok {
+				// if we land here we tried to publish 2 ATXs in the same epoch
+				// don't punish ourselves but fail validation and thereby the handling of the incoming ATX
+				return fmt.Errorf(""%s already published an ATX in epoch %d"", atx.SmesherID.ShortString(),
+					atx.PublishEpoch,
+				)
+			}
+
+			var atxProof mwire.AtxProof
+			for i, a := range []*types.VerifiedActivationTx{prev, atx} {
+				atxProof.Messages[i] = mwire.AtxProofMsg{
+					InnerMsg: types.ATXMetadata{
+						PublishEpoch: a.PublishEpoch,
+						MsgHash:      wire.ActivationTxToWireV1(a.ActivationTx).HashInnerBytes(),
+					},
+					SmesherID: a.SmesherID,
+					Signature: a.Signature,
+				}
+			}
+			proof = &mwire.MalfeasanceProof{
+				Layer: atx.PublishEpoch.FirstLayer(),
+				Proof: mwire.Proof{
+					Type: mwire.MultipleATXs,
+					Data: &atxProof,
+				},
+			}
+			encoded, err := codec.Encode(proof)
+			if err != nil {
+				h.log.With().Panic(""failed to encode malfeasance proof"", log.Err(err))
+			}
+			if err := identities.SetMalicious(tx, atx.SmesherID, encoded, time.Now()); err != nil {
+				return fmt.Errorf(""add malfeasance proof: %w"", err)
+			}
+
+			h.log.WithContext(ctx).With().Warning(""smesher produced more than one atx in the same epoch"",
+				log.Stringer(""smesher"", atx.SmesherID),
+				log.Object(""prev"", prev),
+				log.Object(""curr"", atx),
+			)
+		}
+
+		nonce, err = atxs.AddGettingNonce(tx, atx)
+		if err != nil && !errors.Is(err, sql.ErrObjectExists) {
+			return fmt.Errorf(""add atx to db: %w"", err)
+		}
+		return nil
+	}); err != nil {",1
+"func (e ExitCode) String() string {
+	switch e {
+	case ExitCodeOK:
+		return ""ok""
+	case ExitCodeGrowStack:
+		return ""grow_stack""
+	case ExitCodeCallGoModuleFunction:
+		return ""call_go_module_function""
+	case ExitCodeCallGoFunction:
+		return ""call_go_function""
+	case ExitCodeUnreachable:
+		return ""unreachable""
+	case ExitCodeMemoryOutOfBounds:
+		return ""memory_out_of_bounds""
+	case ExitCodeUnalignedAtomic:
+		return ""unaligned_atomic""
+	case ExitCodeTableOutOfBounds:
+		return ""table_out_of_bounds""
+	case ExitCodeIndirectCallNullPointer:
+		return ""indirect_call_null_pointer""
+	case ExitCodeIndirectCallTypeMismatch:
+		return ""indirect_call_type_mismatch""
+	case ExitCodeIntegerDivisionByZero:
+		return ""integer_division_by_zero""
+	case ExitCodeIntegerOverflow:
+		return ""integer_overflow""
+	case ExitCodeInvalidConversionToInteger:
+		return ""invalid_conversion_to_integer""
+	case ExitCodeCheckModuleExitCode:
+		return ""check_module_exit_code""
+	case ExitCodeCallListenerBefore:
+		return ""call_listener_before""
+	case ExitCodeCallListenerAfter:
+		return ""call_listener_after""
+	case ExitCodeCallGoModuleFunctionWithListener:
+		return ""call_go_module_function_with_listener""
+	case ExitCodeCallGoFunctionWithListener:
+		return ""call_go_function_with_listener""
+	case ExitCodeGrowMemory:
+		return ""grow_memory""
+	case ExitCodeTableGrow:
+		return ""table_grow""
+	case ExitCodeRefFunc:
+		return ""ref_func""
+	case ExitCodeMemoryWait32:
+		return ""memory_wait32""
+	case ExitCodeMemoryWait64:
+		return ""memory_wait64""
+	case ExitCodeMemoryNotify:
+		return ""memory_notify""
+	}
+	panic(""TODO"")
+}",0
+"func (m *machine) insertConditionalJumpTrampoline(cbr *instruction, currentBlk *labelPosition, nextLabel label) {
+	cur := currentBlk.End
+	originalTarget := cbr.condBrLabel()
+	endNext := cur.next
+
+	if cur.kind != br {
+		// If the current block ends with a conditional branch, we can just insert the trampoline after it.
+		// Otherwise, we need to insert ""skip"" instruction to skip the trampoline instructions.
+		skip := m.allocateInstr()
+		skip.asBr(nextLabel)
+		cur = linkInstr(cur, skip)
+	}
+
+	cbrNewTargetInstr, cbrNewTargetLabel := m.allocateBrTarget()
+	cbr.setCondBrTargets(cbrNewTargetLabel)
+	cur = linkInstr(cur, cbrNewTargetInstr)
+
+	// Then insert the unconditional branch to the original, which should be possible to get encoded
+	// as 26-bit offset should be enough for any practical application.
+	br := m.allocateInstr()
+	br.asBr(originalTarget)
+	cur = linkInstr(cur, br)
+
+	// Update the end of the current block.
+	currentBlk.End = cur
+
+	linkInstr(cur, endNext)
+}",0
+"func (m *machine) getOperand_Reg(def *backend.SSAValueDefinition) (op operand) {
+	var v regalloc.VReg
+	if def.IsFromBlockParam() {
+		v = def.BlkParamVReg
+	} else {
+		instr := def.Instr
+		if instr.Constant() {
+			// We inline all the constant instructions so that we could reduce the register usage.
+			v = m.lowerConstant(instr)
+			instr.MarkLowered()
+		} else {
+			if n := def.N; n == 0 {
+				v = m.c.VRegOf(instr.Return())
+			} else {
+				_, rs := instr.Returns()
+				v = m.c.VRegOf(rs[n-1])
+			}
+		}
+	}
+	return newOperandReg(v)
+}",0
+"func (bb *basicBlock) Param(i int) Value {
+	p := &bb.params[i]
+	return p.value
+}",0
+"		Action: func(ctx *cli.Context) error {
+			level, err := log.ParseLevel(ctx.String(""log-level""))
+			if err != nil {
+				return err
+			}
+
+			log.SetLevel(level)
+
+			logFormat := ctx.String(""log-format"")
+			if !isValidLogFormat(logFormat) {
+				return fmt.Errorf(""not a valid log-format: %v"", logFormat)
+			}
+			if logFormat == ""json"" {
+				log.SetFormatter(&log.JSONFormatter{})
+			}
+
+			log.Info(""starting sshpiperd version: "", version())
+			d, err := newDaemon(ctx)
+
+			if err != nil {
+				return err
+			}
+
+			quit := make(chan error)
+			d.lis = &proxyproto.Listener{Listener: d.lis}
+
+			var plugins []*plugin.GrpcPlugin
+
+			args := ctx.Args().Slice()
+			remain := args
+
+			for {
+				if len(remain) <= 0 {
+					break
+				}
+
+				args, remain = splitByDash(remain)
+
+				if len(args) <= 0 {
+					continue
+				}
+
+				var p *plugin.GrpcPlugin
+
+				switch args[0] {
+				case ""grpc"":
+					log.Info(""starting net grpc plugin: "")
+
+					grpcplugin, err := createNetGrpcPlugin(args)
+					if err != nil {
+						return err
+					}
+
+					p = grpcplugin
+
+				default:
+					cmdplugin, err := createCmdPlugin(args)
+					if err != nil {
+						return err
+					}
+
+					go func() {
+						quit <- <-cmdplugin.Quit
+					}()
+
+					p = &cmdplugin.GrpcPlugin
+				}
+
+				go func() {
+					if err := p.RecvLogs(log.StandardLogger().Out); err != nil {
+						log.Errorf(""plugin %v recv logs error: %v"", p.Name, err)
+					}
+				}()
+				plugins = append(plugins, p)
+			}
+
+			if err := d.install(plugins...); err != nil {
+				return err
+			}
+
+			d.recorddir = ctx.String(""typescript-log-dir"")
+			d.filterHostkeysReqeust = ctx.Bool(""drop-hostkeys-message"")
+
+			go func() {
+				quit <- d.run()
+			}()
+
+			return <-quit
+		},
+	}",1
+"func (p Precompile) EmitCreateClawbackVestingAccountEvent(
+	ctx sdk.Context,
+	stateDB vm.StateDB,
+	funderAddr, vestingAddr common.Address,
+) error {
+	// Prepare the event topics
+	event := p.ABI.Events[EventTypeCreateClawbackVestingAccount]
+	topics := make([]common.Hash, 3)
+
+	// The first topic is always the signature of the event.
+	topics[0] = event.ID
+
+	var err error
+	topics[1], err = cmn.MakeTopic(funderAddr)
+	if err != nil {
+		return err
+	}
+
+	topics[2], err = cmn.MakeTopic(vestingAddr)
+	if err != nil {
+		return err
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Create the event
+	stateDB.AddLog(&ethtypes.Log{
+		Address:     p.Address(),
+		Topics:      topics,
+		Data:        nil,
+		BlockNumber: uint64(ctx.BlockHeight()),
+	})
+
+	return nil
+}",1
+"func (UnimplementedFile) Utimens(int64, int64) Errno {
+	return ENOSYS
+}",0
+"func GetGitAuth() *gitHttp.BasicAuth {
+	gitToken := os.Getenv(""GITHUB_TOKEN"")
+
+	if gitToken == """" {
+		// If the token is empty, there's no way we can return a usable authentication
+		// anyway. Whereas if we return nil, and don't auth, we have a chance at
+		// succeeding with access of a public repo.
+		return nil
+	}
+
+	return &gitHttp.BasicAuth{
+		Username: ""abc123"",
+		Password: gitToken,
+	}
+}",1

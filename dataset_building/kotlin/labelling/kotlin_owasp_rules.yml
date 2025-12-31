@@ -1,0 +1,488 @@
+rules:
+  - id: kotlin-owasp-tls-trust-all-x509trustmanager
+    languages: [kotlin]
+    severity: error
+    message: >
+      Trust-all X509TrustManager detected. Accepting any certificate disables TLS verification.
+    metadata:
+      category: security
+      confidence: high
+      owasp: ["A02: Cryptographic Failures", "A05: Security Misconfiguration"]
+      cwe: ["CWE-295: Improper Certificate Validation"]
+    pattern: |
+      object : X509TrustManager {
+        ...
+        override fun checkClientTrusted($...args) { ... }
+        ...
+        override fun checkServerTrusted($...args) { ... }
+        ...
+      }
+
+  - id: kotlin-owasp-tls-hostnameverifier-allow-all
+    languages: [kotlin]
+    severity: error
+    message: >
+      HostnameVerifier always returning true disables host name verification.
+    metadata:
+      category: security
+      confidence: high
+      owasp: ["A02: Cryptographic Failures", "A05: Security Misconfiguration"]
+      cwe: ["CWE-297: Improper Validation of Certificate with Host Mismatch"]
+    pattern-either:
+      - pattern: |
+          HostnameVerifier { $h, $s -> true }
+      - pattern: |
+          HostnameVerifier { _, _ -> true }
+      - pattern: |
+          OkHttpClient.Builder()
+            .hostnameVerifier { _, _ -> true }
+
+  - id: kotlin-owasp-sslcontext-init-trustmanager
+    languages: [kotlin]
+    severity: warning
+    message: >
+      SSLContext.init(null, trustManagers, secureRandom) may indicate a custom TrustManager (possibly trust-all).
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-295: Improper Certificate Validation"]
+    patterns:
+      - pattern: |
+          val $ctx = SSLContext.getInstance($proto)
+          ...
+          $ctx.init(null, $tms, $sr)
+
+  - id: kotlin-owasp-insecure-http-url
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Hard-coded http:// URL found. Prefer https:// for sensitive traffic.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-319: Cleartext Transmission of Sensitive Information"]
+    pattern-regex: "\"http://[^\"]*\""
+
+  - id: kotlin-owasp-retrofit-http-baseurl
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Retrofit baseUrl uses http://. Prefer https:// for API calls.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-319: Cleartext Transmission of Sensitive Information"]
+    pattern-regex: "Retrofit\\.Builder\\(\\)\\s*\\.baseUrl\\(\"http://[^\"]*\"\\)"
+
+  - id: kotlin-owasp-okhttp-custom-sslsocketfactory
+    languages: [kotlin]
+    severity: warning
+    message: >
+      OkHttp custom sslSocketFactory detected. Risky if paired with a weak or trust-all TrustManager.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-295: Improper Certificate Validation"]
+    pattern: |
+      OkHttpClient.Builder()
+        .sslSocketFactory($ssf, $tm)
+
+  - id: kotlin-owasp-webview-js-interface
+    languages: [kotlin]
+    severity: error
+    message: >
+      WebView with JavaScript enabled and addJavascriptInterface can enable code execution if content is untrusted.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["MSTG-PLATFORM-3", "A01: Broken Access Control"]
+      cwe: ["CWE-749: Exposed Dangerous Method or Function"]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $wv.settings.javaScriptEnabled = true
+              ...
+              $wv.addJavascriptInterface($obj, $name)
+          - pattern: |
+              $wv.addJavascriptInterface($obj, $name)
+
+  - id: kotlin-owasp-webview-js-enabled
+    languages: [kotlin]
+    severity: info
+    message: >
+      WebView JavaScript enabled. Ensure this is necessary and safe for the loaded content.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["MSTG-PLATFORM-3"]
+      cwe: ["CWE-79: Cross-site Scripting (XSS)"]
+    pattern: |
+      $wv.settings.javaScriptEnabled = true
+
+  - id: kotlin-owasp-javascriptinterface-annotation
+    languages: [kotlin]
+    severity: warning
+    message: >
+      @JavascriptInterface exposes methods to WebView JavaScript; treat inputs as untrusted.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["MSTG-PLATFORM-3"]
+      cwe: ["CWE-749: Exposed Dangerous Method or Function"]
+    pattern: |
+      @JavascriptInterface
+      fun $func($...args) { ... }
+
+  - id: kotlin-owasp-webview-file-access
+    languages: [kotlin]
+    severity: warning
+    message: >
+      WebView file/universal access enabled. This can allow local file leakage or content access bypass.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["MSTG-PLATFORM-3", "A05: Security Misconfiguration"]
+      cwe: ["CWE-200: Information Exposure"]
+    pattern-either:
+      - pattern: |
+          $wv.settings.allowFileAccess = true
+      - pattern: |
+          $wv.settings.allowContentAccess = true
+      - pattern: |
+          $wv.settings.allowUniversalAccessFromFileURLs = true
+      - pattern: |
+          $wv.settings.allowFileAccessFromFileURLs = true
+
+  - id: kotlin-owasp-webview-savepassword
+    languages: [kotlin]
+    severity: warning
+    message: >
+      WebView savePassword enabled. Storing credentials locally is insecure.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-922: Insecure Storage of Sensitive Information"]
+    pattern: |
+      $wv.settings.savePassword = true
+
+  - id: kotlin-owasp-insecure-cipher
+    languages: [kotlin]
+    severity: error
+    message: >
+      Insecure or deprecated cipher configuration (DES/ECB). Prefer modern AEAD modes (e.g., AES-GCM).
+    metadata:
+      category: security
+      confidence: high
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-327: Broken or Risky Crypto Algorithm"]
+    pattern-either:
+      - pattern: |
+          Cipher.getInstance("DES")
+      - pattern: |
+          Cipher.getInstance("DES/ECB/PKCS5Padding")
+      - pattern: |
+          Cipher.getInstance("AES/ECB/NoPadding")
+      - pattern: |
+          Cipher.getInstance("AES/ECB/PKCS5Padding")
+
+  - id: kotlin-owasp-insecure-rsa-pkcs1
+    languages: [kotlin]
+    severity: warning
+    message: >
+      RSA/ECB/PKCS1Padding is legacy. Consider RSA-OAEP for new designs.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-327: Broken or Risky Crypto Algorithm"]
+    pattern: |
+      Cipher.getInstance("RSA/ECB/PKCS1Padding")
+
+  - id: kotlin-owasp-insecure-hash
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Weak hash algorithm (MD5/SHA-1) detected. Prefer SHA-256 or stronger.
+    metadata:
+      category: security
+      confidence: high
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-328: Use of Weak Hash"]
+    pattern-either:
+      - pattern: |
+          MessageDigest.getInstance("MD5")
+      - pattern: |
+          MessageDigest.getInstance("SHA1")
+      - pattern: |
+          MessageDigest.getInstance("SHA-1")
+
+  - id: kotlin-owasp-hardcoded-key
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Potential hard-coded secret/key detected. Avoid embedding secrets in source code.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A02: Cryptographic Failures", "A04: Insecure Design"]
+      cwe: ["CWE-321: Hard-coded Cryptographic Key"]
+    pattern-either:
+      - pattern: |
+          SecretKeySpec("...".toByteArray(), $alg)
+      - pattern: |
+          val $key = "..."
+      - pattern-regex: "(\"(?i)(api[_-]?key|secret|token|password|pwd)[^\"]*\")"
+
+  - id: kotlin-owasp-base64-credentials
+    languages: [kotlin]
+    severity: info
+    message: >
+      Base64 encoding of credential-like string literal detected. This is not encryption.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-311: Missing Encryption of Sensitive Data"]
+    pattern-regex: "Base64\\.encodeToString\\(\"(?i).*(password|token|secret|api[_-]?key).*\"\\.toByteArray\\(\\),\\s*Base64\\.[A-Z_]+\\)"
+
+  - id: kotlin-owasp-insecure-random
+    languages: [kotlin]
+    severity: info
+    message: >
+      java.util.Random is not suitable for security-sensitive values. Prefer SecureRandom.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-338: Use of Insufficiently Random Values"]
+    pattern-either:
+      - pattern: |
+          val $r = java.util.Random($...args)
+      - pattern: |
+          val $r = Random($...args)
+      - pattern: |
+          java.util.Random().$m($...args)
+
+  - id: kotlin-owasp-insecure-random-seed
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Random seeded with a constant value may be predictable.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-330: Use of Insufficiently Random Values"]
+    pattern-either:
+      - pattern: |
+          val $r = Random($seed)
+      - pattern: |
+          val $r = java.util.Random($seed)
+
+  - id: kotlin-owasp-sql-concat-query
+    languages: [kotlin]
+    severity: warning
+    message: >
+      SQL built via string concatenation. Use parameterized queries to reduce injection risk.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A03: Injection"]
+      cwe: ["CWE-89: SQL Injection"]
+    pattern-either:
+      - pattern: |
+          $db.rawQuery($q + $param, ...)
+      - pattern: |
+          $db.execSQL($q + $param, ...)
+      - pattern: |
+          $db.rawQuery("${$q}$param", ...)
+      - pattern: |
+          $db.execSQL("${$q}$param", ...)
+
+  - id: kotlin-owasp-runtime-exec
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Runtime.exec / ProcessBuilder can lead to command injection if inputs are user-controlled.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A03: Injection"]
+      cwe: ["CWE-78: OS Command Injection"]
+    pattern-either:
+      - pattern: |
+          Runtime.getRuntime().exec($cmd)
+      - pattern: |
+          ProcessBuilder($...args)
+
+  - id: kotlin-owasp-objectinputstream
+    languages: [kotlin]
+    severity: warning
+    message: >
+      ObjectInputStream deserialization can be dangerous with untrusted data. Consider safer formats.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A08: Software and Data Integrity Failures"]
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+    pattern: |
+      ObjectInputStream($stream)
+
+  - id: kotlin-owasp-path-traversal-dotdot
+    languages: [kotlin]
+    severity: info
+    message: >
+      '../' found in string literal. Review path handling to prevent traversal issues.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A01: Broken Access Control"]
+      cwe: ["CWE-22: Path Traversal"]
+    pattern-regex: "\"\\.\\./[^\"]*\""
+
+  - id: kotlin-owasp-sharedprefs-world-readable
+    languages: [kotlin]
+    severity: error
+    message: >
+      World-readable/world-writeable storage detected. This can expose sensitive data.
+    metadata:
+      category: security
+      confidence: high
+      owasp: ["A01: Broken Access Control", "A02: Cryptographic Failures"]
+      cwe: ["CWE-276: Incorrect Default Permissions"]
+    pattern-either:
+      - pattern: |
+          $ctx.getSharedPreferences($name, Context.MODE_WORLD_READABLE)
+      - pattern: |
+          $ctx.getSharedPreferences($name, Context.MODE_WORLD_WRITEABLE)
+      - pattern: |
+          $ctx.openFileOutput($name, Context.MODE_WORLD_READABLE)
+      - pattern: |
+          $ctx.openFileOutput($name, Context.MODE_WORLD_WRITEABLE)
+
+  - id: kotlin-owasp-external-storage
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Writing to external storage may expose sensitive data. Prefer internal or encrypted storage.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures", "A05: Security Misconfiguration"]
+      cwe: ["CWE-922: Insecure Storage of Sensitive Information"]
+    pattern-either:
+      - pattern: |
+          Environment.getExternalStorageDirectory()
+      - pattern-regex: "\"/sdcard/[^\"]*\""
+      - pattern: |
+          File(Environment.getExternalStorageDirectory(), $path)
+
+  - id: kotlin-owasp-sharedprefs-sensitive-key
+    languages: [kotlin]
+    severity: warning
+    message: >
+      SharedPreferences appears to store sensitive information (password/token/secret).
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-359: Exposure of Private Information"]
+    pattern-regex: "putString\\(\"(?i)(password|pwd|token|secret|api[_-]?key)\""
+
+  - id: kotlin-owasp-logging-sensitive-data
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Logging credential-like data via Log.* can leak secrets to logcat.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A09: Security Logging and Monitoring Failures", "A02: Cryptographic Failures"]
+      cwe: ["CWE-532: Insertion of Sensitive Information into Log File"]
+    pattern-regex: "Log\\.(d|i|w|e)\\([^,]+,\\s*\"(?i).*(password|pwd|token|secret|api[_-]?key).*\""
+
+  - id: kotlin-owasp-webview-debugging-enabled
+    languages: [kotlin]
+    severity: warning
+    message: >
+      WebView debugging enabled. This can expose content and cookies on compromised devices.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A05: Security Misconfiguration"]
+      cwe: ["CWE-215: Information Exposure Through Debug Information"]
+    pattern-either:
+      - pattern: |
+          WebView.setWebContentsDebuggingEnabled(true)
+      - pattern: |
+          $wv.setWebContentsDebuggingEnabled(true)
+
+  - id: kotlin-owasp-strictmode-permitall
+    languages: [kotlin]
+    severity: info
+    message: >
+      StrictMode ThreadPolicy permitAll can hide unsafe practices (e.g., network on main thread).
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A04: Insecure Design"]
+      cwe: ["CWE-693: Protection Mechanism Failure"]
+    pattern: |
+      StrictMode.ThreadPolicy.Builder()
+        .permitAll()
+
+  - id: kotlin-owasp-clipboard-sensitive
+    languages: [kotlin]
+    severity: warning
+    message: >
+      Copying credential-like data to clipboard may leak secrets to other apps.
+    metadata:
+      category: security
+      confidence: low
+      owasp: ["A02: Cryptographic Failures"]
+      cwe: ["CWE-359: Exposure of Private Information"]
+    pattern-regex: "setPrimaryClip\\(ClipData\\.newPlainText\\(\"(?i).*(password|token|secret|api[_-]?key).*\""
+
+  - id: kotlin-owasp-dexclassloader
+    languages: [kotlin]
+    severity: warning
+    message: >
+      DexClassLoader loads external code at runtime. Review sources and integrity checks.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["A08: Software and Data Integrity Failures"]
+      cwe: ["CWE-470: Use of Externally-Controlled Input to Select Classes or Code"]
+    pattern: |
+      DexClassLoader($apk, $dir, $lib, $cl)
+
+  - id: kotlin-owasp-webview-file-access-universal
+    languages: [kotlin]
+    severity: warning
+    message: >
+      WebView universal file URL access enabled. This increases risk of local file exfiltration.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["MSTG-PLATFORM-3", "A05: Security Misconfiguration"]
+      cwe: ["CWE-200: Information Exposure"]
+    pattern: |
+      $wv.settings.allowUniversalAccessFromFileURLs = true
+
+  - id: kotlin-owasp-webview-file-access-from-fileurls
+    languages: [kotlin]
+    severity: warning
+    message: >
+      WebView file URL access enabled. Review for file:// content attacks.
+    metadata:
+      category: security
+      confidence: medium
+      owasp: ["MSTG-PLATFORM-3", "A05: Security Misconfiguration"]
+      cwe: ["CWE-200: Information Exposure"]
+    pattern: |
+      $wv.settings.allowFileAccessFromFileURLs = true
