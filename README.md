@@ -24,10 +24,10 @@
   - **CoT + Self-Consistency**
   - results and cross language analysis recorded in the tables of the paper
     
-
+All the experiments done in same env setup
 ## Ebvironmental Setup
 ```bash
 pip install torch==2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 
-All the experiments done in same env setup
+
