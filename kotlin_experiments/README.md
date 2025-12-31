@@ -50,4 +50,5 @@
 - Accuracy, Precision, Recall, F1
 - Specificity (from confusion matrix)
 - MCC, Cohen’s Kappa
-- AUC 
+- AUC
+- Detailed Results are included in the Paper both for finetuning and cross language analysis.
